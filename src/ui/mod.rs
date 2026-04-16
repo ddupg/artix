@@ -501,11 +501,15 @@ fn render_list(state: &AppState, icon_mode: &theme::IconMode) -> List<'static> {
                 ));
             }
 
-            let git_label = match entry.git_status {
-                GitStatus::Ignored => Some("ignored"),
-                GitStatus::Tracked => Some("tracked"),
-                GitStatus::Untracked => Some("untracked"),
-                GitStatus::Unknown => Some("unknown"),
+            let git_label = if !matches!(entry.entry_kind, EntryKind::Parent) {
+                match entry.git_status {
+                    GitStatus::Ignored => Some("ignored"),
+                    GitStatus::Tracked => Some("tracked"),
+                    GitStatus::Untracked => Some("untracked"),
+                    GitStatus::Unknown => Some("unknown"),
+                }
+            } else {
+                None
             };
             if let Some(label) = git_label {
                 spans.push(Span::raw(" "));
