@@ -1,6 +1,6 @@
 use std::fs;
 
-use artix::delete::{delete_directories, DeleteMode};
+use artix::delete::{DeleteMode, delete_directories};
 use tempfile::tempdir;
 
 #[test]

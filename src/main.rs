@@ -1,7 +1,8 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use artix::scan::scan_workspace;
-use artix::ui::build_overview_rows;
+use artix::ui::{build_overview_rows, run_tui};
 
 fn main() {
     let roots: Vec<PathBuf> = std::env::args()
@@ -13,6 +14,19 @@ fn main() {
     } else {
         roots
     };
+
+    if std::io::stdout().is_terminal() && std::env::var("ARTIX_PLAIN").is_err() {
+        let start_dir = roots
+            .first()
+            .cloned()
+            .expect("at least one root is always present");
+        if let Err(err) = run_tui(start_dir) {
+            eprintln!("artix: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let report = scan_workspace(&roots);
     let rows = build_overview_rows(report.projects);
 

@@ -84,10 +84,12 @@ fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
         .map(|candidate| candidate.rule_id.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(candidate_ids, BTreeSet::from(["rust.target"]));
-    assert!(report
-        .candidates
-        .iter()
-        .all(|candidate| candidate.project_root == project));
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.project_root == project)
+    );
 
     let project_summary = &report.projects[0];
     assert_eq!(project_summary.root, project);
