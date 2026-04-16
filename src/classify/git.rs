@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::model::{GitContext, GitStatus, HeadState};
 use crate::rules::Rule;
@@ -103,6 +103,8 @@ fn git_command_succeeds<const N: usize>(cwd: &Path, args: [&str; N]) -> bool {
     Command::new("git")
         .current_dir(cwd)
         .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
