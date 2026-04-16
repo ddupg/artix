@@ -321,6 +321,10 @@ impl BrowserApp {
     }
 
     fn enter_parent(&mut self) -> Result<(), String> {
+        // Don't allow going above the root directory
+        if self.state.current_dir() == self.root_dir {
+            return Ok(());
+        }
         let Some(parent) = self.state.current_dir().parent().map(Path::to_path_buf) else {
             return Ok(());
         };
