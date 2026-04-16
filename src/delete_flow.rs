@@ -33,9 +33,6 @@ pub enum DeleteState {
         entry: BrowserEntry,
         mode: DeleteMode,
     },
-    Succeeded {
-        message: String,
-    },
     Failed {
         message: String,
     },

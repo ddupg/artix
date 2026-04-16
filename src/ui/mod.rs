@@ -192,10 +192,6 @@ impl AppState {
         }
     }
 
-    pub fn finish_delete_success(&mut self, message: String) {
-        self.delete_state = DeleteState::Succeeded { message };
-    }
-
     pub fn finish_delete_failure(&mut self, message: String) {
         self.delete_state = DeleteState::Failed { message };
     }
@@ -361,10 +357,10 @@ impl BrowserApp {
                     _ => return Ok(()),
                 };
                 match execute_delete(&entry, mode) {
-                    Ok(message) => {
+                    Ok(_message) => {
                         self.invalidate_related_paths(&entry.path);
                         self.load_directory(self.state.current_dir().to_path_buf())?;
-                        self.state.finish_delete_success(message);
+                        self.state.clear_delete_state();
                     }
                     Err(err) => self.state.finish_delete_failure(err),
                 }
@@ -384,10 +380,10 @@ impl BrowserApp {
 
         self.state.set_delete_running();
         match execute_delete(&entry, mode) {
-            Ok(message) => {
+            Ok(_message) => {
                 self.invalidate_related_paths(&entry.path);
                 self.load_directory(self.state.current_dir().to_path_buf())?;
-                self.state.finish_delete_success(message);
+                self.state.clear_delete_state();
             }
             Err(err) => self.state.finish_delete_failure(err),
         }
@@ -587,7 +583,7 @@ fn render_footer(state: &AppState) -> Paragraph<'static> {
         DeleteState::Confirming { .. } => "t trash | x permanent | esc cancel",
         DeleteState::AwaitingExtraConfirmation { .. } => "y confirm dangerous delete | esc cancel",
         DeleteState::Running { .. } => "running delete...",
-        DeleteState::Succeeded { .. } | DeleteState::Failed { .. } => "esc dismiss",
+        DeleteState::Failed { .. } => "esc dismiss",
     };
     Paragraph::new(hint).block(Block::default().borders(Borders::ALL).title("Keys"))
 }
@@ -620,7 +616,6 @@ fn render_delete_dialog(state: &DeleteState) -> Paragraph<'static> {
         DeleteState::Running { entry, .. } => {
             vec![Line::raw(format!("Deleting {} ...", entry.path.display()))]
         }
-        DeleteState::Succeeded { message } => vec![Line::raw(message.clone())],
         DeleteState::Failed { message } => vec![Line::raw(message.clone())],
         DeleteState::Idle => vec![Line::raw("")],
     };
