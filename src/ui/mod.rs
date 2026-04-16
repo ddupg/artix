@@ -296,17 +296,19 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, start_dir: PathBuf) -> io::R
 #[derive(Debug)]
 struct BrowserApp {
     state: AppState,
+    root_dir: PathBuf,
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
 }
 
 impl BrowserApp {
     fn new(start_dir: PathBuf) -> Result<Self, String> {
-        let entries = browse_directory(&start_dir)?;
+        let entries = browse_directory(&start_dir, &start_dir)?;
         let mut cache = HashMap::new();
         cache.insert(start_dir.clone(), entries.clone());
 
         Ok(Self {
-            state: AppState::new(start_dir, entries),
+            state: AppState::new(start_dir.clone(), entries),
+            root_dir: start_dir,
             cache,
         })
     }
@@ -329,7 +331,7 @@ impl BrowserApp {
         let entries = if let Some(entries) = self.cache.get(&dir) {
             entries.clone()
         } else {
-            let entries = browse_directory(&dir)?;
+            let entries = browse_directory(&dir, &self.root_dir)?;
             self.cache.insert(dir.clone(), entries.clone());
             entries
         };

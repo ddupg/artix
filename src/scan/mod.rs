@@ -19,13 +19,16 @@ pub struct ScanReport {
     pub projects: Vec<Project>,
 }
 
-pub fn browse_directory(path: &Path) -> Result<Vec<BrowserEntry>, String> {
+pub fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEntry>, String> {
     let rules = default_rules();
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
-    if let Some(parent) = path.parent() {
-        entries.push(BrowserEntry::parent(parent.to_path_buf()));
+    // Only add ".." if we're not at the root directory (the starting directory)
+    if path != root_dir {
+        if let Some(parent) = path.parent() {
+            entries.push(BrowserEntry::parent(parent.to_path_buf()));
+        }
     }
 
     let read_dir = fs::read_dir(path).map_err(|err| err.to_string())?;

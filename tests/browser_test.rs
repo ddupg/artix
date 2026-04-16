@@ -5,7 +5,57 @@ use artix::scan::browse_directory;
 use tempfile::tempdir;
 
 #[test]
-fn browse_directory_includes_parent_and_sorts_cleanup_candidates_by_size() {
+fn browse_directory_root_has_no_parent_entry() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::create_dir_all(root.join("target/debug")).expect("create target");
+    fs::write(root.join("src/lib.rs"), "fn main() {}\n").expect("write src");
+    fs::write(
+        root.join("target/debug/app"),
+        "123456789012345678901234567890",
+    )
+    .expect("write target");
+
+    // When browsing the root directory (same as start_dir), no ".." entry should be present
+    let entries = browse_directory(&root, &root).expect("browse directory");
+    let names = entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+        .collect::<Vec<_>>();
+
+    // No ".." entry at root
+    assert!(!names.iter().any(|(name, _)| *name == ".."));
+    assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+    assert_eq!(names[1], ("src", EntryKind::Directory));
+}
+
+#[test]
+fn browse_directory_subdirectory_has_parent_entry() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::create_dir_all(root.join("target/debug")).expect("create target");
+    fs::write(root.join("src/lib.rs"), "fn main() {}\n").expect("write src");
+    fs::write(
+        root.join("target/debug/app"),
+        "123456789012345678901234567890",
+    )
+    .expect("write target");
+
+    // When browsing a subdirectory, ".." entry should be present
+    let entries = browse_directory(&root.join("src"), &root).expect("browse directory");
+    let names = entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+        .collect::<Vec<_>>();
+
+    // ".." entry should be first in subdirectory
+    assert_eq!(names[0], ("..", EntryKind::Parent));
+}
+
+#[test]
+fn browse_directory_sorts_cleanup_candidates_by_size() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -23,14 +73,14 @@ fn browse_directory_includes_parent_and_sorts_cleanup_candidates_by_size() {
     )
     .expect("write node_modules");
 
-    let entries = browse_directory(&root).expect("browse directory");
+    let entries = browse_directory(&root, &root).expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
         .collect::<Vec<_>>();
 
-    assert_eq!(names[0], ("..", EntryKind::Parent));
-    assert_eq!(names[1], ("target", EntryKind::CleanupCandidate));
-    assert_eq!(names[2], ("node_modules", EntryKind::CleanupCandidate));
-    assert_eq!(names[3], ("src", EntryKind::Directory));
+    // No ".." at root, sorted by size descending
+    assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+    assert_eq!(names[1], ("node_modules", EntryKind::CleanupCandidate));
+    assert_eq!(names[2], ("src", EntryKind::Directory));
 }
