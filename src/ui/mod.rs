@@ -404,7 +404,7 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .areas(area);
 
