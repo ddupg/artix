@@ -1,3 +1,5 @@
+mod theme;
+
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -294,6 +296,7 @@ struct BrowserApp {
     state: AppState,
     root_dir: PathBuf,
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
+    icon_mode: theme::IconMode,
 }
 
 impl BrowserApp {
@@ -306,6 +309,7 @@ impl BrowserApp {
             state: AppState::new(start_dir.clone(), entries),
             root_dir: start_dir,
             cache,
+            icon_mode: theme::IconMode::detect(),
         })
     }
 
@@ -423,7 +427,7 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
     let right = horizontal[1];
 
     frame.render_widget(render_header(&app.state), header);
-    frame.render_widget(render_list(&app.state), left);
+    frame.render_widget(render_list(&app.state, &app.icon_mode), left);
     frame.render_widget(render_context(&app.state), right);
     frame.render_widget(render_footer(&app.state), footer);
 
@@ -461,39 +465,56 @@ fn render_header(state: &AppState) -> Paragraph<'static> {
     Paragraph::new(title).block(Block::default().borders(Borders::ALL).title("Location"))
 }
 
-fn render_list(state: &AppState) -> List<'static> {
+fn render_list(state: &AppState, icon_mode: &theme::IconMode) -> List<'static> {
     let selected_path = state.selected_entry().map(|entry| entry.path);
     let items = state
         .visible_entries()
         .into_iter()
         .map(|entry| {
+            let is_selected = selected_path
+                .as_ref()
+                .is_some_and(|path| path == &entry.path);
+
             let mut spans = vec![
                 Span::styled(
                     format!("{:>8} ", human_bytes(entry.reclaimable_bytes)),
-                    Style::default().fg(Color::Magenta),
+                    theme::size_style(),
                 ),
-                Span::raw(entry.name.clone()),
             ];
+
+            // Icon + Name as a single span for consistent styling
+            let display_name = if icon_mode.is_fancy() {
+                format!("{}  {}", theme::icon_for_entry(&entry), entry.name)
+            } else {
+                entry.name.clone()
+            };
+            spans.push(Span::styled(
+                display_name,
+                theme::name_style(&entry, is_selected),
+            ));
+
             if let Some(kind) = &entry.candidate_kind {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("[{kind}]"),
-                    Style::default().fg(Color::LightBlue),
+                    theme::candidate_badge_style(),
                 ));
             }
+
             let git_label = match entry.git_status {
-                GitStatus::Ignored => Some(("ignored", Color::Green)),
-                GitStatus::Tracked => Some(("tracked", Color::DarkGray)),
-                GitStatus::Untracked => Some(("untracked", Color::Yellow)),
-                GitStatus::Unknown => Some(("unknown", Color::Red)),
+                GitStatus::Ignored => Some("ignored"),
+                GitStatus::Tracked => Some("tracked"),
+                GitStatus::Untracked => Some("untracked"),
+                GitStatus::Unknown => Some("unknown"),
             };
-            if let Some((label, color)) = git_label {
+            if let Some(label) = git_label {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("[{label}]"),
-                    Style::default().fg(color),
+                    theme::git_status_style(&entry.git_status),
                 ));
             }
+
             if entry
                 .git_context
                 .worktree_root
@@ -509,17 +530,12 @@ fn render_list(state: &AppState) -> List<'static> {
                     spans.push(Span::raw(" "));
                     spans.push(Span::styled(
                         format!("<{branch}>"),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        theme::branch_style(),
                     ));
                 }
             }
 
-            let style = if selected_path
-                .as_ref()
-                .is_some_and(|path| path == &entry.path)
-            {
+            let style = if is_selected {
                 Style::default().bg(Color::Blue).fg(Color::White)
             } else {
                 Style::default()
