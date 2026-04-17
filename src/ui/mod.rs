@@ -154,6 +154,15 @@ impl AppState {
         }
     }
 
+    pub fn jump_to_first(&mut self) {
+        self.selected_index = 0;
+    }
+
+    pub fn jump_to_last(&mut self) {
+        let len = self.visible_entries().len();
+        self.selected_index = if len == 0 { 0 } else { len - 1 };
+    }
+
     pub fn delete_intent_for(&self, entry: &BrowserEntry) -> DeleteIntent {
         delete_intent_for(entry)
     }
@@ -290,6 +299,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, start_dir: PathBuf) -> io::R
             KeyCode::Char('q') => break,
             KeyCode::Down | KeyCode::Char('j') => app.state.move_selection_down(),
             KeyCode::Up | KeyCode::Char('k') => app.state.move_selection_up(),
+            KeyCode::Char('g') => app.state.jump_to_first(),
+            KeyCode::Char('G') => app.state.jump_to_last(),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 app.enter_selected().map_err(io::Error::other)?;
             }
@@ -1199,7 +1210,9 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let hint = match state.delete_state() {
-        DeleteState::Idle => "q quit | j/k move | enter open | h back | f filter | d delete",
+        DeleteState::Idle => {
+            "q quit | j/k move | g/G first/last | enter open | h back | f filter | d delete"
+        }
         DeleteState::Confirming { .. } => "t trash | x permanent | esc cancel",
         DeleteState::AwaitingExtraConfirmation { .. } => "y confirm dangerous delete | esc cancel",
         DeleteState::Running { .. } => "running delete...",

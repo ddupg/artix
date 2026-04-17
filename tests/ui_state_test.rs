@@ -126,6 +126,52 @@ fn selection_moves_do_not_panic_on_empty_list() {
     assert!(app.selected_entry().is_none());
 }
 
+#[test]
+fn selection_jump_to_first_selects_first_visible_entry() {
+    let cwd = PathBuf::from("/workspace/repo");
+    let mut app = AppState::new(
+        cwd.clone(),
+        vec![
+            BrowserEntry::parent(cwd.parent().expect("parent").to_path_buf()),
+            entry("a", GitStatus::Unknown, 1),
+            entry("b", GitStatus::Unknown, 1),
+        ],
+    );
+
+    app.jump_to_last();
+    assert_eq!(app.selected_entry().expect("selected").name, "b");
+
+    app.jump_to_first();
+    assert_eq!(app.selected_entry().expect("selected").name, "..");
+}
+
+#[test]
+fn selection_jump_to_last_uses_visible_entries_under_filter() {
+    let cwd = PathBuf::from("/workspace/repo");
+    let mut app = AppState::new(
+        cwd.clone(),
+        vec![
+            BrowserEntry::parent(cwd.parent().expect("parent").to_path_buf()),
+            entry("src", GitStatus::Tracked, 5),
+            entry("target", GitStatus::Ignored, 100),
+            entry("scratch", GitStatus::Unknown, 15),
+        ],
+    );
+
+    app.set_filter_mode(FilterMode::CleanupFocus);
+    app.jump_to_last();
+    assert_eq!(app.selected_entry().expect("selected").name, "scratch");
+}
+
+#[test]
+fn selection_jumps_do_not_panic_on_empty_list() {
+    let cwd = PathBuf::from("/workspace/repo");
+    let mut app = AppState::new(cwd, vec![]);
+    app.jump_to_first();
+    app.jump_to_last();
+    assert!(app.selected_entry().is_none());
+}
+
 fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
     BrowserEntry {
         path: PathBuf::from(format!("/workspace/repo/{name}")),
