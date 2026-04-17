@@ -97,6 +97,8 @@ ARTIX_PLAIN=1 cargo run --quiet -- /path/to/workspace
 ### 4. 主要按键
 
 - `j` / `k` 或上下键：移动选择
+- `g`：跳到第一条
+- `G`：跳到最后一条
 - `Enter` / `l` / 右键：进入目录
 - `Backspace` / `h` / 左键：返回上级目录
 - `f`：切换过滤模式
