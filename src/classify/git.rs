@@ -1,7 +1,7 @@
 use std::fs;
-use std::sync::{Arc, OnceLock};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::model::{GitContext, GitStatus, HeadState};
@@ -128,10 +128,7 @@ fn git_concurrency_limit() -> usize {
 
 async fn git_command_succeeds<const N: usize>(cwd: &Path, args: [&str; N]) -> bool {
     let sem = git_semaphore();
-    let _permit = sem
-        .acquire()
-        .await
-        .expect("semaphore must not be closed");
+    let _permit = sem.acquire().await.expect("semaphore must not be closed");
 
     let mut cmd = tokio::process::Command::new("git");
     cmd.current_dir(cwd)

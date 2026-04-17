@@ -46,10 +46,7 @@ fn size_concurrency_limit() -> usize {
 
 pub async fn dir_size_bytes(path: &Path) -> u64 {
     let sem = size_semaphore();
-    let _permit = sem
-        .acquire()
-        .await
-        .expect("semaphore must not be closed");
+    let _permit = sem.acquire().await.expect("semaphore must not be closed");
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || dir_size_bytes_sync(&path))
         .await

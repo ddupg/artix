@@ -18,7 +18,9 @@ async fn browse_directory_root_has_no_parent_entry() {
     .expect("write target");
 
     // When browsing the root directory (same as start_dir), no ".." entry should be present
-    let entries = browse_directory(&root, &root).await.expect("browse directory");
+    let entries = browse_directory(&root, &root)
+        .await
+        .expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
@@ -81,7 +83,9 @@ async fn browse_directory_sorts_cleanup_candidates_by_size() {
     )
     .expect("write node_modules");
 
-    let entries = browse_directory(&root, &root).await.expect("browse directory");
+    let entries = browse_directory(&root, &root)
+        .await
+        .expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))

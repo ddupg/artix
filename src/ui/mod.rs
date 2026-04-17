@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 use crate::classify::git::resolve_git_context;
 use crate::classify::risk::classify_risk_level;
@@ -130,12 +133,25 @@ impl AppState {
         if len == 0 {
             self.selected_index = 0;
         } else {
-            self.selected_index = (self.selected_index + 1).min(len.saturating_sub(1));
+            self.selected_index = if self.selected_index + 1 >= len {
+                0
+            } else {
+                self.selected_index + 1
+            };
         }
     }
 
     pub fn move_selection_up(&mut self) {
-        self.selected_index = self.selected_index.saturating_sub(1);
+        let len = self.visible_entries().len();
+        if len == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = if self.selected_index == 0 {
+                len.saturating_sub(1)
+            } else {
+                self.selected_index.saturating_sub(1)
+            };
+        }
     }
 
     pub fn delete_intent_for(&self, entry: &BrowserEntry) -> DeleteIntent {
@@ -316,7 +332,10 @@ struct BrowserApp {
 
 #[derive(Debug)]
 enum BgRequest {
-    LoadDirectory { request_id: u64, dir: PathBuf },
+    LoadDirectory {
+        request_id: u64,
+        dir: PathBuf,
+    },
     Delete {
         request_id: u64,
         entry: BrowserEntry,
@@ -386,16 +405,15 @@ impl BrowserApp {
                                     continue;
                                 }
 
-                                let candidate_rule = rules
-                                    .iter()
-                                    .find(|rule| rule.dir_name == name)
-                                    .cloned();
+                                let candidate_rule =
+                                    rules.iter().find(|rule| rule.dir_name == name).cloned();
                                 let entry_kind = if candidate_rule.is_some() {
                                     EntryKind::CleanupCandidate
                                 } else {
                                     EntryKind::Directory
                                 };
-                                let candidate_kind = candidate_rule.as_ref().map(|rule| rule.kind.to_string());
+                                let candidate_kind =
+                                    candidate_rule.as_ref().map(|rule| rule.kind.to_string());
                                 let is_visible_candidate = candidate_rule.is_some();
 
                                 let dir_for_msg = dir.clone();
@@ -403,14 +421,16 @@ impl BrowserApp {
                                 let bg_resp_tx = bg_resp_tx.clone();
 
                                 tokio::spawn(async move {
-                                    let size_bytes = crate::scan::size::dir_size_bytes(&entry_path).await;
-                                    let git_context =
-                                        resolve_git_context(&entry_path).or_else(|| current_context);
-                                    let git_status = crate::classify::git::classify_path_git_status(
-                                        &entry_path,
-                                        git_context.as_ref(),
-                                    )
-                                    .await;
+                                    let size_bytes =
+                                        crate::scan::size::dir_size_bytes(&entry_path).await;
+                                    let git_context = resolve_git_context(&entry_path)
+                                        .or_else(|| current_context);
+                                    let git_status =
+                                        crate::classify::git::classify_path_git_status(
+                                            &entry_path,
+                                            git_context.as_ref(),
+                                        )
+                                        .await;
 
                                     let risk_level = candidate_rule
                                         .as_ref()
@@ -447,10 +467,11 @@ impl BrowserApp {
                         let bg_resp_tx = bg_resp_tx.clone();
                         tokio::spawn(async move {
                             let entry_path = entry.path.clone();
-                            let result = tokio::task::spawn_blocking(move || execute_delete(&entry, mode))
-                                .await
-                                .map_err(|err| err.to_string())
-                                .and_then(|res| res);
+                            let result =
+                                tokio::task::spawn_blocking(move || execute_delete(&entry, mode))
+                                    .await
+                                    .map_err(|err| err.to_string())
+                                    .and_then(|res| res);
                             let _ = bg_resp_tx.send(BgResponse::DeleteFinished {
                                 request_id,
                                 entry_path,
@@ -497,7 +518,9 @@ impl BrowserApp {
                     match result {
                         Ok(entries) => {
                             self.cache.insert(dir.clone(), entries.clone());
-                            if self.state.current_dir() == dir.as_path() && self.state.entries.is_empty() {
+                            if self.state.current_dir() == dir.as_path()
+                                && self.state.entries.is_empty()
+                            {
                                 self.state.replace_entries(dir, entries);
                             }
                         }
@@ -619,10 +642,7 @@ impl BrowserApp {
         };
 
         let visible = self.state.visible_entries();
-        if let Some(idx) = visible
-            .iter()
-            .position(|entry| entry.path == selected_path)
-        {
+        if let Some(idx) = visible.iter().position(|entry| entry.path == selected_path) {
             self.state.selected_index = idx;
         } else {
             self.state.clamp_selection();
@@ -742,12 +762,10 @@ fn quick_browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEnt
     let (parents, mut rest): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
-    rest.sort_by(|left, right| {
-        match (&left.entry_kind, &right.entry_kind) {
-            (EntryKind::CleanupCandidate, EntryKind::Directory) => std::cmp::Ordering::Less,
-            (EntryKind::Directory, EntryKind::CleanupCandidate) => std::cmp::Ordering::Greater,
-            _ => left.name.cmp(&right.name),
-        }
+    rest.sort_by(|left, right| match (&left.entry_kind, &right.entry_kind) {
+        (EntryKind::CleanupCandidate, EntryKind::Directory) => std::cmp::Ordering::Less,
+        (EntryKind::Directory, EntryKind::CleanupCandidate) => std::cmp::Ordering::Greater,
+        _ => left.name.cmp(&right.name),
     });
 
     Ok(parents.into_iter().chain(rest).collect())
@@ -891,12 +909,16 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
     let right = horizontal[1];
 
     frame.render_widget(render_header(&app.state), header);
-    frame.render_widget(
-        render_list(&app.state, &app.icon_mode, &app.loading_paths, app.spinner_tick),
+    render_list(
+        frame,
         left,
+        &app.state,
+        &app.icon_mode,
+        &app.loading_paths,
+        app.spinner_tick,
     );
     frame.render_widget(render_context(&app.state), right);
-    frame.render_widget(render_footer(&app.state), footer);
+    render_footer(frame, footer, &app.state);
 
     if !matches!(app.state.delete_state(), DeleteState::Idle) {
         let popup = centered_rect(area, 70, 45);
@@ -933,102 +955,200 @@ fn render_header(state: &AppState) -> Paragraph<'static> {
 }
 
 fn render_list(
+    frame: &mut ratatui::Frame,
+    area: Rect,
     state: &AppState,
     icon_mode: &theme::IconMode,
     loading_paths: &HashSet<PathBuf>,
     spinner_tick: usize,
-) -> List<'static> {
-    let selected_path = state.selected_entry().map(|entry| entry.path);
-    let items = state
-        .visible_entries()
-        .into_iter()
+) {
+    let block = Block::default().borders(Borders::ALL).title("Browser");
+    frame.render_widget(block.clone(), area);
+
+    let inner = area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let visible = state.visible_entries();
+    let len = visible.len();
+    let selected_index = if len == 0 {
+        0
+    } else {
+        state.selected_index.min(len - 1)
+    };
+
+    // Draw "x of y" on the list border (inside the frame line).
+    render_list_counter(frame, area, selected_index, len);
+    let selected_path = visible.get(selected_index).map(|entry| entry.path.clone());
+
+    let viewport_len = inner.height as usize;
+    let scroll_offset = compute_scroll_offset(len, selected_index, viewport_len);
+
+    let needs_scrollbar = len > viewport_len && viewport_len > 0 && inner.width > 1;
+    let list_area = if needs_scrollbar {
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width.saturating_sub(1),
+            height: inner.height,
+        }
+    } else {
+        inner
+    };
+    let scrollbar_area = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+
+    let start = scroll_offset.min(len);
+    let end = (start + viewport_len).min(len);
+    let items = visible[start..end]
+        .iter()
         .map(|entry| {
             let is_selected = selected_path
                 .as_ref()
                 .is_some_and(|path| path == &entry.path);
-
-            let size_label = if loading_paths.contains(&entry.path)
-                && !matches!(entry.entry_kind, EntryKind::Parent)
-            {
-                spinner_label(spinner_tick).to_string()
-            } else {
-                human_bytes(entry.reclaimable_bytes)
-            };
-
-            let mut spans = vec![
-                Span::styled(
-                    format!("{:>8} ", size_label),
-                    theme::size_style(),
-                ),
-            ];
-
-            // Icon + Name as a single span for consistent styling
-            let display_name = if icon_mode.is_fancy() {
-                format!("{}  {}", theme::icon_for_entry(&entry), entry.name)
-            } else {
-                entry.name.clone()
-            };
-            spans.push(Span::styled(
-                display_name,
-                theme::name_style(&entry, is_selected),
-            ));
-
-            if let Some(kind) = &entry.candidate_kind {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    format!("[{kind}]"),
-                    theme::candidate_badge_style(),
-                ));
-            }
-
-            let git_label = if !matches!(entry.entry_kind, EntryKind::Parent) {
-                match entry.git_status {
-                    GitStatus::Ignored => Some("ignored"),
-                    GitStatus::Tracked => Some("tracked"),
-                    GitStatus::Untracked => Some("untracked"),
-                    GitStatus::Unknown => Some("unknown"),
-                }
-            } else {
-                None
-            };
-            if let Some(label) = git_label {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    format!("[{label}]"),
-                    theme::git_status_style(&entry.git_status),
-                ));
-            }
-
-            if entry
-                .git_context
-                .worktree_root
-                .as_ref()
-                .is_some_and(|root| root == &entry.path)
-                || entry
-                    .git_context
-                    .repo_root
-                    .as_ref()
-                    .is_some_and(|root| root == &entry.path)
-            {
-                if let Some(branch) = &entry.git_context.branch_name {
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        format!("<{branch}>"),
-                        theme::branch_style(),
-                    ));
-                }
-            }
-
-            let style = if is_selected {
-                Style::default().bg(Color::Blue).fg(Color::White)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(spans)).style(style)
+            list_item_for_entry(entry, is_selected, icon_mode, loading_paths, spinner_tick)
         })
         .collect::<Vec<_>>();
 
-    List::new(items).block(Block::default().borders(Borders::ALL).title("Browser"))
+    frame.render_widget(List::new(items), list_area);
+
+    if needs_scrollbar {
+        let mut sb_state = ScrollbarState::new(len)
+            .viewport_content_length(viewport_len)
+            // In ratatui, the thumb is computed from `[position, position + viewport_len]`.
+            // Using the selected index keeps the thumb in sync with the cursor: when the cursor
+            // reaches the last item, the thumb reaches the bottom.
+            .position(selected_index);
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        frame.render_stateful_widget(sb, scrollbar_area, &mut sb_state);
+    }
+}
+
+fn render_list_counter(frame: &mut ratatui::Frame, area: Rect, selected_index: usize, len: usize) {
+    if area.width < 3 || area.height < 2 {
+        return;
+    }
+
+    let x = if len == 0 {
+        0
+    } else {
+        selected_index.saturating_add(1)
+    };
+    let y = len;
+    let counter = format!("{x} of {y}");
+    let label = format!(" {counter} ");
+
+    // Render over the bottom border line, excluding the corners.
+    let border_inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(area.height.saturating_sub(1)),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(label).alignment(Alignment::Center),
+        border_inner,
+    );
+}
+
+fn list_item_for_entry(
+    entry: &BrowserEntry,
+    is_selected: bool,
+    icon_mode: &theme::IconMode,
+    loading_paths: &HashSet<PathBuf>,
+    spinner_tick: usize,
+) -> ListItem<'static> {
+    let size_label =
+        if loading_paths.contains(&entry.path) && !matches!(entry.entry_kind, EntryKind::Parent) {
+            spinner_label(spinner_tick).to_string()
+        } else {
+            human_bytes(entry.reclaimable_bytes)
+        };
+
+    let mut spans = vec![Span::styled(
+        format!("{:>8} ", size_label),
+        theme::size_style(),
+    )];
+
+    let display_name = if icon_mode.is_fancy() {
+        format!("{}  {}", theme::icon_for_entry(entry), entry.name)
+    } else {
+        entry.name.clone()
+    };
+    spans.push(Span::styled(
+        display_name,
+        theme::name_style(entry, is_selected),
+    ));
+
+    if let Some(kind) = &entry.candidate_kind {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{kind}]"),
+            theme::candidate_badge_style(),
+        ));
+    }
+
+    let git_label = if !matches!(entry.entry_kind, EntryKind::Parent) {
+        match entry.git_status {
+            GitStatus::Ignored => Some("ignored"),
+            GitStatus::Tracked => Some("tracked"),
+            GitStatus::Untracked => Some("untracked"),
+            GitStatus::Unknown => Some("unknown"),
+        }
+    } else {
+        None
+    };
+    if let Some(label) = git_label {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{label}]"),
+            theme::git_status_style(&entry.git_status),
+        ));
+    }
+
+    if entry
+        .git_context
+        .worktree_root
+        .as_ref()
+        .is_some_and(|root| root == &entry.path)
+        || entry
+            .git_context
+            .repo_root
+            .as_ref()
+            .is_some_and(|root| root == &entry.path)
+    {
+        if let Some(branch) = &entry.git_context.branch_name {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(format!("<{branch}>"), theme::branch_style()));
+        }
+    }
+
+    let style = if is_selected {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    } else {
+        Style::default()
+    };
+    ListItem::new(Line::from(spans)).style(style)
+}
+
+fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize) -> usize {
+    if viewport_len == 0 || len <= viewport_len {
+        return 0;
+    }
+
+    let selected_index = selected_index.min(len.saturating_sub(1));
+    let half = viewport_len / 2;
+    let desired = selected_index.saturating_sub(half);
+    let max_offset = len.saturating_sub(viewport_len);
+    desired.min(max_offset)
 }
 
 fn render_context(state: &AppState) -> Paragraph<'static> {
@@ -1077,7 +1197,7 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn render_footer(state: &AppState) -> Paragraph<'static> {
+fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let hint = match state.delete_state() {
         DeleteState::Idle => "q quit | j/k move | enter open | h back | f filter | d delete",
         DeleteState::Confirming { .. } => "t trash | x permanent | esc cancel",
@@ -1085,7 +1205,16 @@ fn render_footer(state: &AppState) -> Paragraph<'static> {
         DeleteState::Running { .. } => "running delete...",
         DeleteState::Failed { .. } => "esc dismiss",
     };
-    Paragraph::new(hint).block(Block::default().borders(Borders::ALL).title("Keys"))
+
+    let block = Block::default().borders(Borders::ALL).title("Keys");
+    frame.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Paragraph::new(hint), inner);
 }
 
 fn render_delete_dialog(state: &DeleteState) -> Paragraph<'static> {

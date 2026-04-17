@@ -50,10 +50,7 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
             continue;
         }
 
-        let candidate_rule = rules
-            .iter()
-            .find(|rule| rule.dir_name == name)
-            .cloned();
+        let candidate_rule = rules.iter().find(|rule| rule.dir_name == name).cloned();
         let current_context = current_context.clone();
 
         jobs.spawn(async move {
@@ -111,16 +108,19 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
 pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
     let rules = default_rules();
     let roots_cloned = roots.to_vec();
-    let ownership_markers = tokio::task::spawn_blocking(move || collect_ownership_markers(&roots_cloned))
-        .await
-        .unwrap_or_default();
+    let ownership_markers =
+        tokio::task::spawn_blocking(move || collect_ownership_markers(&roots_cloned))
+            .await
+            .unwrap_or_default();
     let project_roots = infer_project_roots(&ownership_markers);
 
     let rules_for_discover = rules.clone();
     let roots_cloned = roots.to_vec();
-    let discovered = tokio::task::spawn_blocking(move || discover_candidates(&roots_cloned, &rules_for_discover))
-        .await
-        .unwrap_or_default();
+    let discovered = tokio::task::spawn_blocking(move || {
+        discover_candidates(&roots_cloned, &rules_for_discover)
+    })
+    .await
+    .unwrap_or_default();
 
     let fs_limit = fs_concurrency_limit();
     let fs_sem = std::sync::Arc::new(Semaphore::new(fs_limit));
@@ -134,7 +134,10 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
         let project_roots = project_roots.clone();
         let roots = roots.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = fs_sem.acquire().await.expect("semaphore must not be closed");
+            let _permit = fs_sem
+                .acquire()
+                .await
+                .expect("semaphore must not be closed");
 
             let project_root = resolve_owner_project(&discovered.path, project_roots.as_ref())
                 .or_else(|| {
