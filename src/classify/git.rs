@@ -1,9 +1,12 @@
 use std::fs;
+use std::sync::{Arc, OnceLock};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::time::Duration;
 
 use crate::model::{GitContext, GitStatus, HeadState};
 use crate::rules::Rule;
+use tokio::sync::Semaphore;
 
 pub fn classify_git_status(candidate: &Path, project_root: &Path, rule: &Rule) -> GitStatus {
     let gitignore_path = project_root.join(".gitignore");
@@ -62,7 +65,7 @@ pub fn resolve_git_context(path: &Path) -> Option<GitContext> {
     })
 }
 
-pub fn classify_path_git_status(path: &Path, git_context: Option<&GitContext>) -> GitStatus {
+pub async fn classify_path_git_status(path: &Path, git_context: Option<&GitContext>) -> GitStatus {
     let Some(context) = git_context else {
         return GitStatus::Unknown;
     };
@@ -85,12 +88,16 @@ pub fn classify_path_git_status(path: &Path, git_context: Option<&GitContext>) -
     if git_command_succeeds(
         worktree_root,
         ["check-ignore", "-q", "--", relative_arg.as_str()],
-    ) {
+    )
+    .await
+    {
         GitStatus::Ignored
     } else if git_command_succeeds(
         worktree_root,
         ["ls-files", "--error-unmatch", "--", relative_arg.as_str()],
-    ) {
+    )
+    .await
+    {
         GitStatus::Tracked
     } else if path.exists() {
         GitStatus::Untracked
@@ -99,13 +106,42 @@ pub fn classify_path_git_status(path: &Path, git_context: Option<&GitContext>) -
     }
 }
 
-fn git_command_succeeds<const N: usize>(cwd: &Path, args: [&str; N]) -> bool {
-    Command::new("git")
-        .current_dir(cwd)
+static GIT_CONCURRENCY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn git_semaphore() -> Arc<Semaphore> {
+    GIT_CONCURRENCY
+        .get_or_init(|| Arc::new(Semaphore::new(git_concurrency_limit())))
+        .clone()
+}
+
+fn git_concurrency_limit() -> usize {
+    let default = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let default = default.clamp(2, 8);
+    std::env::var("ARTIX_GIT_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+async fn git_command_succeeds<const N: usize>(cwd: &Path, args: [&str; N]) -> bool {
+    let sem = git_semaphore();
+    let _permit = sem
+        .acquire()
+        .await
+        .expect("semaphore must not be closed");
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(cwd)
         .args(args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .stderr(Stdio::null());
+
+    let status = match tokio::time::timeout(Duration::from_secs(2), cmd.status()).await {
+        Ok(Ok(status)) => status,
+        _ => return false,
+    };
+    status.success()
 }

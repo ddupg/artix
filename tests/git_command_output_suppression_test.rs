@@ -74,6 +74,10 @@ fn child_probe() {
         head_state: artix::model::HeadState::Unknown,
         is_worktree: false,
     };
-    let status = classify_path_git_status(&root.join(".gstack"), Some(&context));
+    let status = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { classify_path_git_status(&root.join(".gstack"), Some(&context)).await });
     assert_eq!(status, GitStatus::Untracked);
 }

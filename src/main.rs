@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use artix::scan::scan_workspace;
 use artix::ui::{build_overview_rows, run_tui};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let roots: Vec<PathBuf> = std::env::args()
         .skip(1)
         .map(PathBuf::from)
@@ -20,14 +21,15 @@ fn main() {
             .first()
             .cloned()
             .expect("at least one root is always present");
-        if let Err(err) = run_tui(start_dir) {
+        if let Err(err) = run_tui(start_dir).await {
             eprintln!("artix: {err}");
             std::process::exit(1);
         }
-        return;
+        // Ensure we exit promptly even if background blocking tasks are still running.
+        std::process::exit(0);
     }
 
-    let report = scan_workspace(&roots);
+    let report = scan_workspace(&roots).await;
     let rows = build_overview_rows(report.projects);
 
     for row in rows {

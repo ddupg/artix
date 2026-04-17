@@ -8,6 +8,7 @@ crossterm = "0.29.0"
 gix = { version = "0.81.0", features = ["excludes"] }
 ignore = "0.4.25"
 ratatui = "0.30.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
 trash = "5"
 
 [dev-dependencies]

@@ -1,6 +1,7 @@
 mod theme;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,10 +13,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::classify::git::resolve_git_context;
+use crate::classify::risk::classify_risk_level;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{delete_intent_for, execute_delete};
-use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
-use crate::scan::browse_directory;
+use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project, RiskLevel};
+use crate::rules::default_rules;
+
+use tokio::sync::mpsc;
 
 pub use crate::delete_flow::{DeleteIntent, DeleteState, DeleteTargetKind};
 
@@ -240,7 +244,7 @@ pub fn build_overview_rows(mut projects: Vec<Project>) -> Vec<OverviewRow> {
         .collect()
 }
 
-pub fn run_tui(start_dir: PathBuf) -> Result<(), String> {
+pub async fn run_tui(start_dir: PathBuf) -> Result<(), String> {
     let mut terminal = ratatui::init();
     let result = run_app(&mut terminal, start_dir);
     ratatui::restore();
@@ -251,6 +255,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, start_dir: PathBuf) -> io::R
     let mut app = BrowserApp::new(start_dir).map_err(io::Error::other)?;
 
     loop {
+        app.pump_background();
+        app.spinner_tick = app.spinner_tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &app))?;
 
         if !event::poll(Duration::from_millis(100))? {
@@ -297,27 +303,259 @@ struct BrowserApp {
     root_dir: PathBuf,
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
     icon_mode: theme::IconMode,
+
+    bg_tx: mpsc::UnboundedSender<BgRequest>,
+    bg_rx: mpsc::UnboundedReceiver<BgResponse>,
+    next_request_id: u64,
+    pending_load_id: Option<u64>,
+    pending_delete_id: Option<u64>,
+
+    loading_paths: HashSet<PathBuf>,
+    spinner_tick: usize,
+}
+
+#[derive(Debug)]
+enum BgRequest {
+    LoadDirectory { request_id: u64, dir: PathBuf },
+    Delete {
+        request_id: u64,
+        entry: BrowserEntry,
+        mode: DeleteMode,
+    },
+}
+
+#[derive(Debug)]
+enum BgResponse {
+    DirectoryLoaded {
+        request_id: u64,
+        dir: PathBuf,
+        result: Result<Vec<BrowserEntry>, String>,
+    },
+    EntryUpdated {
+        request_id: u64,
+        dir: PathBuf,
+        entry: BrowserEntry,
+    },
+    DeleteFinished {
+        request_id: u64,
+        entry_path: PathBuf,
+        result: Result<String, String>,
+    },
 }
 
 impl BrowserApp {
     fn new(start_dir: PathBuf) -> Result<Self, String> {
-        let entries = browse_directory(&start_dir, &start_dir)?;
-        let mut cache = HashMap::new();
-        cache.insert(start_dir.clone(), entries.clone());
+        let (bg_tx, mut bg_req_rx) = mpsc::unbounded_channel::<BgRequest>();
+        let (bg_resp_tx, bg_rx) = mpsc::unbounded_channel::<BgResponse>();
 
-        Ok(Self {
-            state: AppState::new(start_dir.clone(), entries),
-            root_dir: start_dir,
-            cache,
+        let root_dir = start_dir.clone();
+        tokio::spawn(async move {
+            while let Some(req) = bg_req_rx.recv().await {
+                match req {
+                    BgRequest::LoadDirectory { request_id, dir } => {
+                        let root_dir = root_dir.clone();
+                        let bg_resp_tx = bg_resp_tx.clone();
+                        tokio::spawn(async move {
+                            // Send a quick listing first (0B sizes) so UI can populate even if
+                            // the in-thread quick path failed.
+                            let initial = quick_browse_directory(&dir, &root_dir);
+                            let _ = bg_resp_tx.send(BgResponse::DirectoryLoaded {
+                                request_id,
+                                dir: dir.clone(),
+                                result: initial,
+                            });
+
+                            // Then progressively compute size/git per entry and stream updates.
+                            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                                return;
+                            };
+                            let rules = default_rules();
+                            let current_context = resolve_git_context(&dir);
+
+                            for entry in read_dir.flatten() {
+                                let entry_path = entry.path();
+                                if !entry_path.is_dir() {
+                                    continue;
+                                }
+                                let name = entry_path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                if name == ".git" {
+                                    continue;
+                                }
+
+                                let candidate_rule = rules
+                                    .iter()
+                                    .find(|rule| rule.dir_name == name)
+                                    .cloned();
+                                let entry_kind = if candidate_rule.is_some() {
+                                    EntryKind::CleanupCandidate
+                                } else {
+                                    EntryKind::Directory
+                                };
+                                let candidate_kind = candidate_rule.as_ref().map(|rule| rule.kind.to_string());
+                                let is_visible_candidate = candidate_rule.is_some();
+
+                                let dir_for_msg = dir.clone();
+                                let current_context = current_context.clone();
+                                let bg_resp_tx = bg_resp_tx.clone();
+
+                                tokio::spawn(async move {
+                                    let size_bytes = crate::scan::size::dir_size_bytes(&entry_path).await;
+                                    let git_context =
+                                        resolve_git_context(&entry_path).or_else(|| current_context);
+                                    let git_status = crate::classify::git::classify_path_git_status(
+                                        &entry_path,
+                                        git_context.as_ref(),
+                                    )
+                                    .await;
+
+                                    let risk_level = candidate_rule
+                                        .as_ref()
+                                        .map(|rule| classify_risk_level(rule, &git_status))
+                                        .unwrap_or(RiskLevel::Hidden);
+
+                                    let entry = BrowserEntry {
+                                        path: entry_path,
+                                        name,
+                                        size_bytes,
+                                        reclaimable_bytes: size_bytes,
+                                        entry_kind,
+                                        git_status,
+                                        git_context: git_context.unwrap_or_default(),
+                                        risk_level,
+                                        candidate_kind,
+                                        is_visible_candidate,
+                                    };
+
+                                    let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
+                                        request_id,
+                                        dir: dir_for_msg,
+                                        entry,
+                                    });
+                                });
+                            }
+                        });
+                    }
+                    BgRequest::Delete {
+                        request_id,
+                        entry,
+                        mode,
+                    } => {
+                        let bg_resp_tx = bg_resp_tx.clone();
+                        tokio::spawn(async move {
+                            let entry_path = entry.path.clone();
+                            let result = tokio::task::spawn_blocking(move || execute_delete(&entry, mode))
+                                .await
+                                .map_err(|err| err.to_string())
+                                .and_then(|res| res);
+                            let _ = bg_resp_tx.send(BgResponse::DeleteFinished {
+                                request_id,
+                                entry_path,
+                                result,
+                            });
+                        });
+                    }
+                }
+            }
+        });
+
+        let mut app = Self {
+            state: AppState::new(start_dir.clone(), Vec::new()),
+            root_dir: start_dir.clone(),
+            cache: HashMap::new(),
             icon_mode: theme::IconMode::detect(),
-        })
+
+            bg_tx,
+            bg_rx,
+            next_request_id: 1,
+            pending_load_id: None,
+            pending_delete_id: None,
+
+            loading_paths: HashSet::new(),
+            spinner_tick: 0,
+        };
+
+        app.load_directory(start_dir);
+        Ok(app)
+    }
+
+    fn pump_background(&mut self) {
+        while let Ok(msg) = self.bg_rx.try_recv() {
+            match msg {
+                BgResponse::DirectoryLoaded {
+                    request_id,
+                    dir,
+                    result,
+                } => {
+                    if self.pending_load_id != Some(request_id) {
+                        continue;
+                    }
+
+                    match result {
+                        Ok(entries) => {
+                            self.cache.insert(dir.clone(), entries.clone());
+                            if self.state.current_dir() == dir.as_path() && self.state.entries.is_empty() {
+                                self.state.replace_entries(dir, entries);
+                            }
+                        }
+                        Err(err) => {
+                            self.state.finish_delete_failure(err);
+                        }
+                    }
+                }
+                BgResponse::EntryUpdated {
+                    request_id,
+                    dir,
+                    entry,
+                } => {
+                    if self.pending_load_id != Some(request_id) {
+                        continue;
+                    }
+                    if self.state.current_dir() != dir.as_path() {
+                        continue;
+                    }
+
+                    if let Some(entries) = self.cache.get_mut(&dir) {
+                        apply_entry_update(entries, &entry);
+                        sort_entries(entries);
+                    }
+                    apply_entry_update(&mut self.state.entries, &entry);
+                    self.resort_visible_entries_preserving_selection();
+                    self.loading_paths.remove(&entry.path);
+                }
+                BgResponse::DeleteFinished {
+                    request_id,
+                    entry_path,
+                    result,
+                } => {
+                    if self.pending_delete_id != Some(request_id) {
+                        continue;
+                    }
+                    self.pending_delete_id = None;
+
+                    match result {
+                        Ok(_message) => {
+                            self.invalidate_related_paths(&entry_path);
+                            let current = self.state.current_dir().to_path_buf();
+                            self.state.clear_delete_state();
+                            self.load_directory(current);
+                        }
+                        Err(err) => self.state.finish_delete_failure(err),
+                    }
+                }
+            }
+        }
     }
 
     fn enter_selected(&mut self) -> Result<(), String> {
         let Some(entry) = self.state.selected_entry() else {
             return Ok(());
         };
-        self.load_directory(entry.path)
+        self.load_directory(entry.path);
+        Ok(())
     }
 
     fn enter_parent(&mut self) -> Result<(), String> {
@@ -328,19 +566,67 @@ impl BrowserApp {
         let Some(parent) = self.state.current_dir().parent().map(Path::to_path_buf) else {
             return Ok(());
         };
-        self.load_directory(parent)
+        self.load_directory(parent);
+        Ok(())
     }
 
-    fn load_directory(&mut self, dir: PathBuf) -> Result<(), String> {
-        let entries = if let Some(entries) = self.cache.get(&dir) {
-            entries.clone()
-        } else {
-            let entries = browse_directory(&dir, &self.root_dir)?;
+    fn load_directory(&mut self, dir: PathBuf) {
+        self.loading_paths.clear();
+        if let Some(entries) = self.cache.get(&dir).cloned() {
+            self.state.replace_entries(dir, entries);
+            self.loading_paths.extend(
+                self.state
+                    .entries()
+                    .iter()
+                    .filter(|entry| !matches!(entry.entry_kind, EntryKind::Parent))
+                    .filter(|entry| entry.size_bytes == 0 && entry.git_status == GitStatus::Unknown)
+                    .map(|entry| entry.path.clone()),
+            );
+            return;
+        }
+
+        // Provide a fast placeholder listing so the UI is immediately usable.
+        if let Ok(entries) = quick_browse_directory(&dir, &self.root_dir) {
             self.cache.insert(dir.clone(), entries.clone());
-            entries
+            self.state.replace_entries(dir.clone(), entries);
+            self.loading_paths.extend(
+                self.state
+                    .entries()
+                    .iter()
+                    .filter(|entry| !matches!(entry.entry_kind, EntryKind::Parent))
+                    .map(|entry| entry.path.clone()),
+            );
+        } else {
+            // Optimistically switch directory; entries will be populated asynchronously.
+            self.state.replace_entries(dir.clone(), Vec::new());
+        }
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending_load_id = Some(request_id);
+        let _ = self
+            .bg_tx
+            .send(BgRequest::LoadDirectory { request_id, dir });
+    }
+
+    fn resort_visible_entries_preserving_selection(&mut self) {
+        let selected_path = self.state.selected_entry().map(|entry| entry.path);
+        sort_entries(&mut self.state.entries);
+
+        let Some(selected_path) = selected_path else {
+            self.state.clamp_selection();
+            return;
         };
-        self.state.replace_entries(dir, entries);
-        Ok(())
+
+        let visible = self.state.visible_entries();
+        if let Some(idx) = visible
+            .iter()
+            .position(|entry| entry.path == selected_path)
+        {
+            self.state.selected_index = idx;
+        } else {
+            self.state.clamp_selection();
+        }
     }
 
     fn run_delete(&mut self, mode: DeleteMode) -> Result<(), String> {
@@ -360,14 +646,15 @@ impl BrowserApp {
                     DeleteState::Running { entry, .. } => entry.clone(),
                     _ => return Ok(()),
                 };
-                match execute_delete(&entry, mode) {
-                    Ok(_message) => {
-                        self.invalidate_related_paths(&entry.path);
-                        self.load_directory(self.state.current_dir().to_path_buf())?;
-                        self.state.clear_delete_state();
-                    }
-                    Err(err) => self.state.finish_delete_failure(err),
-                }
+
+                let request_id = self.next_request_id;
+                self.next_request_id = self.next_request_id.saturating_add(1);
+                self.pending_delete_id = Some(request_id);
+                let _ = self.bg_tx.send(BgRequest::Delete {
+                    request_id,
+                    entry,
+                    mode,
+                });
                 Ok(())
             }
             _ => Ok(()),
@@ -383,14 +670,15 @@ impl BrowserApp {
         };
 
         self.state.set_delete_running();
-        match execute_delete(&entry, mode) {
-            Ok(_message) => {
-                self.invalidate_related_paths(&entry.path);
-                self.load_directory(self.state.current_dir().to_path_buf())?;
-                self.state.clear_delete_state();
-            }
-            Err(err) => self.state.finish_delete_failure(err),
-        }
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending_delete_id = Some(request_id);
+        let _ = self.bg_tx.send(BgRequest::Delete {
+            request_id,
+            entry,
+            mode,
+        });
         Ok(())
     }
 
@@ -398,6 +686,182 @@ impl BrowserApp {
         self.cache.retain(|cached_dir, _| {
             !(path.starts_with(cached_dir.as_path()) || cached_dir.starts_with(path))
         });
+    }
+}
+
+fn quick_browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEntry>, String> {
+    let rules = default_rules();
+    let current_context = resolve_git_context(path);
+    let mut entries = Vec::new();
+
+    if path != root_dir {
+        if let Some(parent) = path.parent() {
+            entries.push(BrowserEntry::parent(parent.to_path_buf()));
+        }
+    }
+
+    let read_dir = std::fs::read_dir(path).map_err(|err| err.to_string())?;
+    for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let name = entry_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        if name == ".git" {
+            continue;
+        }
+
+        let candidate_rule = rules.iter().find(|rule| rule.dir_name == name);
+        let entry_kind = if candidate_rule.is_some() {
+            EntryKind::CleanupCandidate
+        } else {
+            EntryKind::Directory
+        };
+
+        let git_context = resolve_git_context(&entry_path).or_else(|| current_context.clone());
+
+        entries.push(BrowserEntry {
+            path: entry_path,
+            name,
+            size_bytes: 0,
+            reclaimable_bytes: 0,
+            entry_kind,
+            git_status: GitStatus::Unknown,
+            git_context: git_context.unwrap_or_default(),
+            risk_level: RiskLevel::Hidden,
+            candidate_kind: candidate_rule.map(|rule| rule.kind.to_string()),
+            is_visible_candidate: candidate_rule.is_some(),
+        });
+    }
+
+    let (parents, mut rest): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
+    rest.sort_by(|left, right| {
+        match (&left.entry_kind, &right.entry_kind) {
+            (EntryKind::CleanupCandidate, EntryKind::Directory) => std::cmp::Ordering::Less,
+            (EntryKind::Directory, EntryKind::CleanupCandidate) => std::cmp::Ordering::Greater,
+            _ => left.name.cmp(&right.name),
+        }
+    });
+
+    Ok(parents.into_iter().chain(rest).collect())
+}
+
+fn sort_entries(entries: &mut Vec<BrowserEntry>) {
+    let (parents, mut rest): (Vec<_>, Vec<_>) = entries
+        .drain(..)
+        .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
+    rest.sort_by(|left, right| {
+        right
+            .reclaimable_bytes
+            .cmp(&left.reclaimable_bytes)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    entries.extend(parents.into_iter().chain(rest));
+}
+
+fn apply_entry_update(entries: &mut [BrowserEntry], update: &BrowserEntry) {
+    for entry in entries {
+        if entry.path == update.path {
+            entry.size_bytes = update.size_bytes;
+            entry.reclaimable_bytes = update.reclaimable_bytes;
+            entry.git_status = update.git_status.clone();
+            entry.git_context = update.git_context.clone();
+            entry.risk_level = update.risk_level.clone();
+            entry.entry_kind = update.entry_kind.clone();
+            entry.candidate_kind = update.candidate_kind.clone();
+            entry.is_visible_candidate = update.is_visible_candidate;
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_entry_update;
+    use super::sort_entries;
+    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+
+    #[test]
+    fn apply_entry_update_updates_matching_path_in_place() {
+        let mut entries = vec![BrowserEntry {
+            path: "/tmp/a".into(),
+            name: "a".into(),
+            size_bytes: 0,
+            reclaimable_bytes: 0,
+            entry_kind: EntryKind::Directory,
+            git_status: GitStatus::Unknown,
+            git_context: GitContext::default(),
+            risk_level: RiskLevel::Hidden,
+            candidate_kind: None,
+            is_visible_candidate: false,
+        }];
+
+        let update = BrowserEntry {
+            path: "/tmp/a".into(),
+            name: "a".into(),
+            size_bytes: 123,
+            reclaimable_bytes: 123,
+            entry_kind: EntryKind::CleanupCandidate,
+            git_status: GitStatus::Ignored,
+            git_context: GitContext::default(),
+            risk_level: RiskLevel::Low,
+            candidate_kind: Some("rust-target".into()),
+            is_visible_candidate: true,
+        };
+
+        apply_entry_update(&mut entries, &update);
+
+        assert_eq!(entries[0].size_bytes, 123);
+        assert_eq!(entries[0].reclaimable_bytes, 123);
+        assert_eq!(entries[0].git_status, GitStatus::Ignored);
+        assert_eq!(entries[0].risk_level, RiskLevel::Low);
+        assert_eq!(entries[0].entry_kind, EntryKind::CleanupCandidate);
+        assert_eq!(entries[0].candidate_kind.as_deref(), Some("rust-target"));
+        assert!(entries[0].is_visible_candidate);
+    }
+
+    #[test]
+    fn sort_entries_puts_parent_first_then_size_desc() {
+        let mut entries = vec![
+            BrowserEntry {
+                path: "/tmp/b".into(),
+                name: "b".into(),
+                size_bytes: 10,
+                reclaimable_bytes: 10,
+                entry_kind: EntryKind::Directory,
+                git_status: GitStatus::Unknown,
+                git_context: GitContext::default(),
+                risk_level: RiskLevel::Hidden,
+                candidate_kind: None,
+                is_visible_candidate: false,
+            },
+            BrowserEntry::parent("/tmp".into()),
+            BrowserEntry {
+                path: "/tmp/a".into(),
+                name: "a".into(),
+                size_bytes: 99,
+                reclaimable_bytes: 99,
+                entry_kind: EntryKind::Directory,
+                git_status: GitStatus::Unknown,
+                git_context: GitContext::default(),
+                risk_level: RiskLevel::Hidden,
+                candidate_kind: None,
+                is_visible_candidate: false,
+            },
+        ];
+
+        sort_entries(&mut entries);
+
+        assert_eq!(entries[0].entry_kind, EntryKind::Parent);
+        assert_eq!(entries[1].name, "a");
+        assert_eq!(entries[2].name, "b");
     }
 }
 
@@ -427,7 +891,10 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
     let right = horizontal[1];
 
     frame.render_widget(render_header(&app.state), header);
-    frame.render_widget(render_list(&app.state, &app.icon_mode), left);
+    frame.render_widget(
+        render_list(&app.state, &app.icon_mode, &app.loading_paths, app.spinner_tick),
+        left,
+    );
     frame.render_widget(render_context(&app.state), right);
     frame.render_widget(render_footer(&app.state), footer);
 
@@ -465,7 +932,12 @@ fn render_header(state: &AppState) -> Paragraph<'static> {
     Paragraph::new(title).block(Block::default().borders(Borders::ALL).title("Location"))
 }
 
-fn render_list(state: &AppState, icon_mode: &theme::IconMode) -> List<'static> {
+fn render_list(
+    state: &AppState,
+    icon_mode: &theme::IconMode,
+    loading_paths: &HashSet<PathBuf>,
+    spinner_tick: usize,
+) -> List<'static> {
     let selected_path = state.selected_entry().map(|entry| entry.path);
     let items = state
         .visible_entries()
@@ -475,9 +947,17 @@ fn render_list(state: &AppState, icon_mode: &theme::IconMode) -> List<'static> {
                 .as_ref()
                 .is_some_and(|path| path == &entry.path);
 
+            let size_label = if loading_paths.contains(&entry.path)
+                && !matches!(entry.entry_kind, EntryKind::Parent)
+            {
+                spinner_label(spinner_tick).to_string()
+            } else {
+                human_bytes(entry.reclaimable_bytes)
+            };
+
             let mut spans = vec![
                 Span::styled(
-                    format!("{:>8} ", human_bytes(entry.reclaimable_bytes)),
+                    format!("{:>8} ", size_label),
                     theme::size_style(),
                 ),
             ];
@@ -683,4 +1163,9 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1}{}", UNITS[unit])
     }
+}
+
+fn spinner_label(tick: usize) -> &'static str {
+    const FRAMES: [&str; 4] = [".", "..", "...", "...."];
+    FRAMES[tick % FRAMES.len()]
 }

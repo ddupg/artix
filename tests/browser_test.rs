@@ -4,8 +4,8 @@ use artix::model::EntryKind;
 use artix::scan::browse_directory;
 use tempfile::tempdir;
 
-#[test]
-fn browse_directory_root_has_no_parent_entry() {
+#[tokio::test]
+async fn browse_directory_root_has_no_parent_entry() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -18,7 +18,7 @@ fn browse_directory_root_has_no_parent_entry() {
     .expect("write target");
 
     // When browsing the root directory (same as start_dir), no ".." entry should be present
-    let entries = browse_directory(&root, &root).expect("browse directory");
+    let entries = browse_directory(&root, &root).await.expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
@@ -28,10 +28,16 @@ fn browse_directory_root_has_no_parent_entry() {
     assert!(!names.iter().any(|(name, _)| *name == ".."));
     assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
     assert_eq!(names[1], ("src", EntryKind::Directory));
+
+    let src = entries
+        .iter()
+        .find(|entry| entry.name == "src")
+        .expect("src entry");
+    assert!(src.size_bytes > 0, "expected src directory size to be > 0");
 }
 
-#[test]
-fn browse_directory_subdirectory_has_parent_entry() {
+#[tokio::test]
+async fn browse_directory_subdirectory_has_parent_entry() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -44,7 +50,9 @@ fn browse_directory_subdirectory_has_parent_entry() {
     .expect("write target");
 
     // When browsing a subdirectory, ".." entry should be present
-    let entries = browse_directory(&root.join("src"), &root).expect("browse directory");
+    let entries = browse_directory(&root.join("src"), &root)
+        .await
+        .expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
@@ -54,8 +62,8 @@ fn browse_directory_subdirectory_has_parent_entry() {
     assert_eq!(names[0], ("..", EntryKind::Parent));
 }
 
-#[test]
-fn browse_directory_sorts_cleanup_candidates_by_size() {
+#[tokio::test]
+async fn browse_directory_sorts_cleanup_candidates_by_size() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -73,7 +81,7 @@ fn browse_directory_sorts_cleanup_candidates_by_size() {
     )
     .expect("write node_modules");
 
-    let entries = browse_directory(&root, &root).expect("browse directory");
+    let entries = browse_directory(&root, &root).await.expect("browse directory");
     let names = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))

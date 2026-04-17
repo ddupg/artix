@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artix::model::Project;
@@ -9,8 +10,8 @@ use artix::model::{GitStatus, RiskLevel};
 use artix::scan::scan_workspace;
 use artix::ui::build_overview_rows;
 
-#[test]
-fn scan_workspace_finds_target_and_classifies_minimally() {
+#[tokio::test]
+async fn scan_workspace_finds_target_and_classifies_minimally() {
     let project = make_temp_project();
 
     fs::write(
@@ -24,7 +25,7 @@ fn scan_workspace_finds_target_and_classifies_minimally() {
     fs::create_dir_all(target_file.parent().expect("target dir")).expect("create target dir");
     fs::write(&target_file, "binary").expect("write target/debug/app");
 
-    let report = scan_workspace(std::slice::from_ref(&project));
+    let report = scan_workspace(std::slice::from_ref(&project)).await;
 
     let candidate = report
         .candidates
@@ -48,8 +49,8 @@ fn scan_workspace_finds_target_and_classifies_minimally() {
     fs::remove_dir_all(&project).expect("cleanup temp project");
 }
 
-#[test]
-fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
+#[tokio::test]
+async fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
     let project = make_temp_project();
 
     fs::write(
@@ -73,7 +74,7 @@ fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
         .expect("create nested target dir");
     fs::write(&nested_target, "binary").expect("write packages/app/target/debug/tool");
 
-    let report = scan_workspace(std::slice::from_ref(&project));
+    let report = scan_workspace(std::slice::from_ref(&project)).await;
 
     assert_eq!(report.candidates.len(), 2);
     assert_eq!(report.projects.len(), 1);
@@ -113,8 +114,8 @@ fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
     fs::remove_dir_all(&project).expect("cleanup temp project");
 }
 
-#[test]
-fn scan_workspace_assigns_nested_node_modules_to_nearest_node_project() {
+#[tokio::test]
+async fn scan_workspace_assigns_nested_node_modules_to_nearest_node_project() {
     let workspace = make_temp_project();
     let app = workspace.join("apps/web");
 
@@ -127,7 +128,7 @@ fn scan_workspace_assigns_nested_node_modules_to_nearest_node_project() {
     fs::write(node_modules_pkg.join("index.js"), "module.exports = {};\n")
         .expect("write react entrypoint");
 
-    let report = scan_workspace(std::slice::from_ref(&workspace));
+    let report = scan_workspace(std::slice::from_ref(&workspace)).await;
 
     let candidate = report
         .candidates
@@ -147,8 +148,8 @@ fn scan_workspace_assigns_nested_node_modules_to_nearest_node_project() {
     fs::remove_dir_all(&workspace).expect("cleanup temp project");
 }
 
-#[test]
-fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
+#[tokio::test]
+async fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
     let workspace = make_temp_project();
     let app = workspace.join("services/api");
 
@@ -164,7 +165,7 @@ fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
     fs::create_dir_all(&venv_bin).expect("create .venv/bin");
     fs::write(venv_bin.join("python"), "#!/usr/bin/env python3\n").expect("write python shim");
 
-    let report = scan_workspace(std::slice::from_ref(&workspace));
+    let report = scan_workspace(std::slice::from_ref(&workspace)).await;
 
     let candidate = report
         .candidates
@@ -243,11 +244,14 @@ fn cli_without_args_scans_current_directory() {
 }
 
 fn make_temp_project() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time after epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("artix-scan-pipeline-{unique}"));
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("artix-scan-pipeline-{pid}-{counter}-{unique}"));
     fs::create_dir_all(&path).expect("create temp project root");
     path
 }
