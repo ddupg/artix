@@ -2,18 +2,17 @@ pub mod discover;
 pub mod size;
 
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::classify::git::{classify_git_status, classify_path_git_status, resolve_git_context};
 use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
 use crate::classify::risk::classify_risk_level;
+use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, EntryKind, Project, RiskLevel};
 use crate::rules::{Rule, default_rules};
 use discover::discover_candidates;
 use size::dir_size_bytes;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,15 +22,24 @@ pub struct ScanReport {
 }
 
 pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEntry>, String> {
+    let ctx = AppContext::default();
+    browse_directory_with_context(path, root_dir, &ctx).await
+}
+
+pub async fn browse_directory_with_context(
+    path: &Path,
+    root_dir: &Path,
+    ctx: &AppContext,
+) -> Result<Vec<BrowserEntry>, String> {
     let rules = default_rules();
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
     // Only add ".." if we're not at the root directory (the starting directory)
-    if path != root_dir {
-        if let Some(parent) = path.parent() {
-            entries.push(BrowserEntry::parent(parent.to_path_buf()));
-        }
+    if path != root_dir
+        && let Some(parent) = path.parent()
+    {
+        entries.push(BrowserEntry::parent(parent.to_path_buf()));
     }
 
     let read_dir = fs::read_dir(path).map_err(|err| err.to_string())?;
@@ -52,6 +60,7 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
 
         let candidate_rule = rules.iter().find(|rule| rule.dir_name == name).cloned();
         let current_context = current_context.clone();
+        let ctx = ctx.clone();
 
         jobs.spawn(async move {
             let entry_kind = if candidate_rule.is_some() {
@@ -60,10 +69,11 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
                 EntryKind::Directory
             };
 
-            let size_bytes = dir_size_bytes(&entry_path).await;
+            let size_bytes = dir_size_bytes(&entry_path, &ctx).await;
 
-            let git_context = resolve_git_context(&entry_path).or_else(|| current_context);
-            let git_status = classify_path_git_status(&entry_path, git_context.as_ref()).await;
+            let git_context = resolve_git_context(&entry_path).or(current_context);
+            let git_status =
+                classify_path_git_status(&entry_path, git_context.as_ref(), &ctx).await;
             let risk_level = candidate_rule
                 .as_ref()
                 .map(|rule| classify_risk_level(rule, &git_status))
@@ -107,6 +117,11 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
 }
 
 pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
+    let ctx = AppContext::default();
+    scan_workspace_with_context(roots, &ctx).await
+}
+
+pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) -> ScanReport {
     let rules = default_rules();
     let roots_cloned = roots.to_vec();
     let ownership_markers =
@@ -123,9 +138,7 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
     .await
     .unwrap_or_default();
 
-    let fs_limit = fs_concurrency_limit();
-    let fs_sem = std::sync::Arc::new(Semaphore::new(fs_limit));
-
+    let fs_sem = ctx.fs_semaphore();
     let roots = std::sync::Arc::new(roots.to_vec());
     let project_roots = std::sync::Arc::new(project_roots);
 
@@ -134,6 +147,7 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
         let fs_sem = fs_sem.clone();
         let project_roots = project_roots.clone();
         let roots = roots.clone();
+        let config = ctx.config().clone();
         handles.push(tokio::spawn(async move {
             let _permit = fs_sem
                 .acquire()
@@ -156,7 +170,7 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
             let candidate = tokio::task::spawn_blocking(move || {
                 let git_status = classify_git_status(&path, &project_root, &rule);
                 let risk_level = classify_risk_level(&rule, &git_status);
-                let size_bytes = crate::scan::size::dir_size_bytes_sync(&path);
+                let size_bytes = crate::scan::size::dir_size_bytes_sync_with_config(&path, &config);
 
                 CandidateDir {
                     path,
@@ -194,18 +208,6 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
         candidates,
         projects,
     }
-}
-
-fn fs_concurrency_limit() -> usize {
-    let default = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let default = (default.saturating_mul(2)).clamp(2, 16);
-    env::var("ARTIX_FS_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
 }
 
 fn collect_ownership_markers(roots: &[PathBuf]) -> Vec<PathBuf> {

@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::{Config, DeleteConfig, TrashBackend};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteMode {
     Trash,
@@ -9,10 +11,18 @@ pub enum DeleteMode {
 }
 
 pub fn delete_directories(paths: &[PathBuf], mode: DeleteMode) -> Result<(), String> {
+    delete_directories_with_config(paths, mode, &Config::default().delete)
+}
+
+pub fn delete_directories_with_config(
+    paths: &[PathBuf],
+    mode: DeleteMode,
+    delete_config: &DeleteConfig,
+) -> Result<(), String> {
     match mode {
         DeleteMode::Trash => {
             for path in paths {
-                move_to_trash(path)?;
+                move_to_trash(path, delete_config)?;
             }
             Ok(())
         }
@@ -29,8 +39,8 @@ pub fn delete_directories(paths: &[PathBuf], mode: DeleteMode) -> Result<(), Str
     }
 }
 
-fn move_to_trash(path: &Path) -> Result<(), String> {
-    if should_force_builtin_trash() {
+fn move_to_trash(path: &Path, delete_config: &DeleteConfig) -> Result<(), String> {
+    if matches!(delete_config.trash_backend, TrashBackend::Builtin) {
         return move_to_builtin_trash(path);
     }
 
@@ -46,10 +56,6 @@ fn move_to_trash(path: &Path) -> Result<(), String> {
             Err(trash_err.to_string())
         }
     })
-}
-
-fn should_force_builtin_trash() -> bool {
-    env::var_os("ARTIX_FORCE_BUILTIN_TRASH").is_some()
 }
 
 fn move_to_builtin_trash(path: &Path) -> Result<(), String> {

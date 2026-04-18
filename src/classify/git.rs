@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::config::AppContext;
 use crate::model::{GitContext, GitStatus, HeadState};
 use crate::rules::Rule;
-use tokio::sync::Semaphore;
 
 pub fn classify_git_status(candidate: &Path, project_root: &Path, rule: &Rule) -> GitStatus {
     let gitignore_path = project_root.join(".gitignore");
@@ -65,7 +64,11 @@ pub fn resolve_git_context(path: &Path) -> Option<GitContext> {
     })
 }
 
-pub async fn classify_path_git_status(path: &Path, git_context: Option<&GitContext>) -> GitStatus {
+pub async fn classify_path_git_status(
+    path: &Path,
+    git_context: Option<&GitContext>,
+    ctx: &AppContext,
+) -> GitStatus {
     let Some(context) = git_context else {
         return GitStatus::Unknown;
     };
@@ -88,6 +91,7 @@ pub async fn classify_path_git_status(path: &Path, git_context: Option<&GitConte
     if git_command_succeeds(
         worktree_root,
         ["check-ignore", "-q", "--", relative_arg.as_str()],
+        ctx,
     )
     .await
     {
@@ -95,6 +99,7 @@ pub async fn classify_path_git_status(path: &Path, git_context: Option<&GitConte
     } else if git_command_succeeds(
         worktree_root,
         ["ls-files", "--error-unmatch", "--", relative_arg.as_str()],
+        ctx,
     )
     .await
     {
@@ -106,28 +111,12 @@ pub async fn classify_path_git_status(path: &Path, git_context: Option<&GitConte
     }
 }
 
-static GIT_CONCURRENCY: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-fn git_semaphore() -> Arc<Semaphore> {
-    GIT_CONCURRENCY
-        .get_or_init(|| Arc::new(Semaphore::new(git_concurrency_limit())))
-        .clone()
-}
-
-fn git_concurrency_limit() -> usize {
-    let default = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let default = default.clamp(2, 8);
-    std::env::var("ARTIX_GIT_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
-async fn git_command_succeeds<const N: usize>(cwd: &Path, args: [&str; N]) -> bool {
-    let sem = git_semaphore();
+async fn git_command_succeeds<const N: usize>(
+    cwd: &Path,
+    args: [&str; N],
+    ctx: &AppContext,
+) -> bool {
+    let sem = ctx.git_semaphore();
     let _permit = sem.acquire().await.expect("semaphore must not be closed");
 
     let mut cmd = tokio::process::Command::new("git");

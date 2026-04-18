@@ -1,4 +1,5 @@
-use crate::delete::{DeleteMode, delete_directories};
+use crate::config::{Config, DeleteConfig};
+use crate::delete::{DeleteMode, delete_directories_with_config};
 use crate::model::{BrowserEntry, GitStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +53,19 @@ pub fn delete_intent_for(entry: &BrowserEntry) -> DeleteIntent {
 }
 
 pub fn execute_delete(entry: &BrowserEntry, mode: DeleteMode) -> Result<String, String> {
-    delete_directories(std::slice::from_ref(&entry.path), mode.clone())?;
+    execute_delete_with_config(entry, mode, &Config::default().delete)
+}
+
+pub fn execute_delete_with_config(
+    entry: &BrowserEntry,
+    mode: DeleteMode,
+    delete_config: &DeleteConfig,
+) -> Result<String, String> {
+    delete_directories_with_config(
+        std::slice::from_ref(&entry.path),
+        mode.clone(),
+        delete_config,
+    )?;
 
     let mode_label = match mode {
         DeleteMode::Trash => "moved to trash",

@@ -17,8 +17,9 @@ use ratatui::widgets::{
 
 use crate::classify::git::resolve_git_context;
 use crate::classify::risk::classify_risk_level;
+use crate::config::AppContext;
 use crate::delete::DeleteMode;
-use crate::delete_flow::{delete_intent_for, execute_delete};
+use crate::delete_flow::{delete_intent_for, execute_delete_with_config};
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project, RiskLevel};
 use crate::rules::default_rules;
 
@@ -271,14 +272,23 @@ pub fn build_overview_rows(mut projects: Vec<Project>) -> Vec<OverviewRow> {
 }
 
 pub async fn run_tui(start_dir: PathBuf) -> Result<(), String> {
+    let ctx = AppContext::default();
+    run_tui_with_context(start_dir, ctx).await
+}
+
+pub async fn run_tui_with_context(start_dir: PathBuf, ctx: AppContext) -> Result<(), String> {
     let mut terminal = ratatui::init();
-    let result = run_app(&mut terminal, start_dir);
+    let result = run_app(&mut terminal, start_dir, ctx);
     ratatui::restore();
     result.map_err(|err| err.to_string())
 }
 
-fn run_app(terminal: &mut ratatui::DefaultTerminal, start_dir: PathBuf) -> io::Result<()> {
-    let mut app = BrowserApp::new(start_dir).map_err(io::Error::other)?;
+fn run_app(
+    terminal: &mut ratatui::DefaultTerminal,
+    start_dir: PathBuf,
+    ctx: AppContext,
+) -> io::Result<()> {
+    let mut app = BrowserApp::new(start_dir, ctx).map_err(io::Error::other)?;
 
     loop {
         app.pump_background();
@@ -328,6 +338,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, start_dir: PathBuf) -> io::R
 #[derive(Debug)]
 struct BrowserApp {
     state: AppState,
+    ctx: AppContext,
     root_dir: PathBuf,
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
     icon_mode: theme::IconMode,
@@ -350,7 +361,7 @@ enum BgRequest {
     },
     Delete {
         request_id: u64,
-        entry: BrowserEntry,
+        entry: Box<BrowserEntry>,
         mode: DeleteMode,
     },
 }
@@ -365,7 +376,7 @@ enum BgResponse {
     EntryUpdated {
         request_id: u64,
         dir: PathBuf,
-        entry: BrowserEntry,
+        entry: Box<BrowserEntry>,
     },
     DeleteFinished {
         request_id: u64,
@@ -374,24 +385,14 @@ enum BgResponse {
     },
 }
 
-fn tui_entry_concurrency_limit() -> usize {
-    let default = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let default = (default.saturating_mul(2)).clamp(4, 32);
-    std::env::var("ARTIX_TUI_ENTRY_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
 impl BrowserApp {
-    fn new(start_dir: PathBuf) -> Result<Self, String> {
+    fn new(start_dir: PathBuf, ctx: AppContext) -> Result<Self, String> {
         let (bg_tx, mut bg_req_rx) = mpsc::unbounded_channel::<BgRequest>();
         let (bg_resp_tx, bg_rx) = mpsc::unbounded_channel::<BgResponse>();
 
         let root_dir = start_dir.clone();
+        let bg_ctx = ctx.clone();
+        let icon_mode = theme::IconMode::from_enabled(ctx.config().ui.icons);
         tokio::spawn(async move {
             let mut active_load: Option<tokio::task::JoinHandle<()>> = None;
             while let Some(req) = bg_req_rx.recv().await {
@@ -402,11 +403,12 @@ impl BrowserApp {
                         }
                         let root_dir = root_dir.clone();
                         let bg_resp_tx = bg_resp_tx.clone();
-                        let entry_limit = tui_entry_concurrency_limit();
+                        let ctx = bg_ctx.clone();
+                        let entry_limit = ctx.config().performance.tui_entry_concurrency;
                         active_load = Some(tokio::spawn(async move {
                             // Send a quick listing first (0B sizes) so UI can populate even if
                             // the in-thread quick path failed.
-                            let initial = quick_browse_directory(&dir, &root_dir);
+                            let initial = quick_browse_directory(&dir, &root_dir, &ctx);
                             let _ = bg_resp_tx.send(BgResponse::DirectoryLoaded {
                                 request_id,
                                 dir: dir.clone(),
@@ -423,14 +425,14 @@ impl BrowserApp {
                             let mut jobs = JoinSet::new();
                             for entry in read_dir.flatten() {
                                 while jobs.len() >= entry_limit {
-                                    if let Some(res) = jobs.join_next().await {
-                                        if let Ok(Some(entry)) = res {
-                                            let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
-                                                request_id,
-                                                dir: dir.clone(),
-                                                entry,
-                                            });
-                                        }
+                                    if let Some(res) = jobs.join_next().await
+                                        && let Ok(Some(entry)) = res
+                                    {
+                                        let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
+                                            request_id,
+                                            dir: dir.clone(),
+                                            entry: Box::new(entry),
+                                        });
                                     }
                                 }
 
@@ -459,16 +461,22 @@ impl BrowserApp {
                                 let is_visible_candidate = candidate_rule.is_some();
 
                                 let current_context = current_context.clone();
+                                let ctx = ctx.clone();
                                 jobs.spawn(async move {
-                                    let size = crate::scan::size::dir_size_bytes_budgeted(&entry_path)
-                                        .await;
-                                    let git_context =
-                                        resolve_git_context(&entry_path).or_else(|| current_context);
-                                    let git_status = crate::classify::git::classify_path_git_status(
+                                    let size = crate::scan::size::dir_size_bytes_budgeted(
                                         &entry_path,
-                                        git_context.as_ref(),
+                                        &ctx,
                                     )
                                     .await;
+                                    let git_context =
+                                        resolve_git_context(&entry_path).or(current_context);
+                                    let git_status =
+                                        crate::classify::git::classify_path_git_status(
+                                            &entry_path,
+                                            git_context.as_ref(),
+                                            &ctx,
+                                        )
+                                        .await;
 
                                     let risk_level = candidate_rule
                                         .as_ref()
@@ -496,7 +504,7 @@ impl BrowserApp {
                                     let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
                                         request_id,
                                         dir: dir.clone(),
-                                        entry,
+                                        entry: Box::new(entry),
                                     });
                                 }
                             }
@@ -508,13 +516,15 @@ impl BrowserApp {
                         mode,
                     } => {
                         let bg_resp_tx = bg_resp_tx.clone();
+                        let delete_config = bg_ctx.config().delete;
                         tokio::spawn(async move {
                             let entry_path = entry.path.clone();
-                            let result =
-                                tokio::task::spawn_blocking(move || execute_delete(&entry, mode))
-                                    .await
-                                    .map_err(|err| err.to_string())
-                                    .and_then(|res| res);
+                            let result = tokio::task::spawn_blocking(move || {
+                                execute_delete_with_config(&entry, mode, &delete_config)
+                            })
+                            .await
+                            .map_err(|err| err.to_string())
+                            .and_then(|res| res);
                             let _ = bg_resp_tx.send(BgResponse::DeleteFinished {
                                 request_id,
                                 entry_path,
@@ -528,9 +538,10 @@ impl BrowserApp {
 
         let mut app = Self {
             state: AppState::new(start_dir.clone(), Vec::new()),
+            ctx,
             root_dir: start_dir.clone(),
             cache: HashMap::new(),
-            icon_mode: theme::IconMode::detect(),
+            icon_mode,
 
             bg_tx,
             bg_rx,
@@ -577,6 +588,7 @@ impl BrowserApp {
                     dir,
                     entry,
                 } => {
+                    let entry = *entry;
                     if self.pending_load_id != Some(request_id) {
                         continue;
                     }
@@ -652,7 +664,7 @@ impl BrowserApp {
         }
 
         // Provide a fast placeholder listing so the UI is immediately usable.
-        if let Ok(entries) = quick_browse_directory(&dir, &self.root_dir) {
+        if let Ok(entries) = quick_browse_directory(&dir, &self.root_dir, &self.ctx) {
             self.cache.insert(dir.clone(), entries.clone());
             self.state.replace_entries(dir.clone(), entries);
             self.loading_paths.extend(
@@ -715,7 +727,7 @@ impl BrowserApp {
                 self.pending_delete_id = Some(request_id);
                 let _ = self.bg_tx.send(BgRequest::Delete {
                     request_id,
-                    entry,
+                    entry: Box::new(entry),
                     mode,
                 });
                 Ok(())
@@ -739,7 +751,7 @@ impl BrowserApp {
         self.pending_delete_id = Some(request_id);
         let _ = self.bg_tx.send(BgRequest::Delete {
             request_id,
-            entry,
+            entry: Box::new(entry),
             mode,
         });
         Ok(())
@@ -752,15 +764,19 @@ impl BrowserApp {
     }
 }
 
-fn quick_browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEntry>, String> {
+fn quick_browse_directory(
+    path: &Path,
+    root_dir: &Path,
+    _ctx: &AppContext,
+) -> Result<Vec<BrowserEntry>, String> {
     let rules = default_rules();
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
-    if path != root_dir {
-        if let Some(parent) = path.parent() {
-            entries.push(BrowserEntry::parent(parent.to_path_buf()));
-        }
+    if path != root_dir
+        && let Some(parent) = path.parent()
+    {
+        entries.push(BrowserEntry::parent(parent.to_path_buf()));
     }
 
     let read_dir = std::fs::read_dir(path).map_err(|err| err.to_string())?;
@@ -786,7 +802,7 @@ fn quick_browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEnt
             EntryKind::Directory
         };
 
-        let git_context = resolve_git_context(&entry_path).or_else(|| current_context.clone());
+        let git_context = resolve_git_context(&entry_path).or(current_context.clone());
 
         entries.push(BrowserEntry {
             path: entry_path,
@@ -842,93 +858,6 @@ fn apply_entry_update(entries: &mut [BrowserEntry], update: &BrowserEntry) {
             entry.is_visible_candidate = update.is_visible_candidate;
             break;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::apply_entry_update;
-    use super::sort_entries;
-    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
-
-    #[test]
-    fn apply_entry_update_updates_matching_path_in_place() {
-        let mut entries = vec![BrowserEntry {
-            path: "/tmp/a".into(),
-            name: "a".into(),
-            size_bytes: 0,
-            reclaimable_bytes: 0,
-            size_complete: true,
-            entry_kind: EntryKind::Directory,
-            git_status: GitStatus::Unknown,
-            git_context: GitContext::default(),
-            risk_level: RiskLevel::Hidden,
-            candidate_kind: None,
-            is_visible_candidate: false,
-        }];
-
-        let update = BrowserEntry {
-            path: "/tmp/a".into(),
-            name: "a".into(),
-            size_bytes: 123,
-            reclaimable_bytes: 123,
-            size_complete: true,
-            entry_kind: EntryKind::CleanupCandidate,
-            git_status: GitStatus::Ignored,
-            git_context: GitContext::default(),
-            risk_level: RiskLevel::Low,
-            candidate_kind: Some("rust-target".into()),
-            is_visible_candidate: true,
-        };
-
-        apply_entry_update(&mut entries, &update);
-
-        assert_eq!(entries[0].size_bytes, 123);
-        assert_eq!(entries[0].reclaimable_bytes, 123);
-        assert_eq!(entries[0].git_status, GitStatus::Ignored);
-        assert_eq!(entries[0].risk_level, RiskLevel::Low);
-        assert_eq!(entries[0].entry_kind, EntryKind::CleanupCandidate);
-        assert_eq!(entries[0].candidate_kind.as_deref(), Some("rust-target"));
-        assert!(entries[0].is_visible_candidate);
-    }
-
-    #[test]
-    fn sort_entries_puts_parent_first_then_size_desc() {
-        let mut entries = vec![
-            BrowserEntry {
-                path: "/tmp/b".into(),
-                name: "b".into(),
-                size_bytes: 10,
-                reclaimable_bytes: 10,
-                size_complete: true,
-                entry_kind: EntryKind::Directory,
-                git_status: GitStatus::Unknown,
-                git_context: GitContext::default(),
-                risk_level: RiskLevel::Hidden,
-                candidate_kind: None,
-                is_visible_candidate: false,
-            },
-            BrowserEntry::parent("/tmp".into()),
-            BrowserEntry {
-                path: "/tmp/a".into(),
-                name: "a".into(),
-                size_bytes: 99,
-                reclaimable_bytes: 99,
-                size_complete: true,
-                entry_kind: EntryKind::Directory,
-                git_status: GitStatus::Unknown,
-                git_context: GitContext::default(),
-                risk_level: RiskLevel::Hidden,
-                candidate_kind: None,
-                is_visible_candidate: false,
-            },
-        ];
-
-        sort_entries(&mut entries);
-
-        assert_eq!(entries[0].entry_kind, EntryKind::Parent);
-        assert_eq!(entries[1].name, "a");
-        assert_eq!(entries[2].name, "b");
     }
 }
 
@@ -1167,7 +1096,7 @@ fn list_item_for_entry(
         ));
     }
 
-    if entry
+    if (entry
         .git_context
         .worktree_root
         .as_ref()
@@ -1176,12 +1105,11 @@ fn list_item_for_entry(
             .git_context
             .repo_root
             .as_ref()
-            .is_some_and(|root| root == &entry.path)
+            .is_some_and(|root| root == &entry.path))
+        && let Some(branch) = &entry.git_context.branch_name
     {
-        if let Some(branch) = &entry.git_context.branch_name {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(format!("<{branch}>"), theme::branch_style()));
-        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("<{branch}>"), theme::branch_style()));
     }
 
     let style = if is_selected {
@@ -1219,10 +1147,7 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
         vec![
             Line::raw(format!("path: {}", entry.path.display())),
             Line::raw(format!("size: {}", size_label)),
-            Line::raw(format!(
-                "reclaimable: {}",
-                reclaimable_label
-            )),
+            Line::raw(format!("reclaimable: {}", reclaimable_label)),
             Line::raw(format!("git: {:?}", entry.git_status)),
             Line::raw(format!(
                 "repo root: {}",
@@ -1362,4 +1287,91 @@ fn human_bytes(bytes: u64) -> String {
 fn spinner_label(tick: usize) -> &'static str {
     const FRAMES: [&str; 4] = [".", "..", "...", "...."];
     FRAMES[tick % FRAMES.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_entry_update;
+    use super::sort_entries;
+    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+
+    #[test]
+    fn apply_entry_update_updates_matching_path_in_place() {
+        let mut entries = vec![BrowserEntry {
+            path: "/tmp/a".into(),
+            name: "a".into(),
+            size_bytes: 0,
+            reclaimable_bytes: 0,
+            size_complete: true,
+            entry_kind: EntryKind::Directory,
+            git_status: GitStatus::Unknown,
+            git_context: GitContext::default(),
+            risk_level: RiskLevel::Hidden,
+            candidate_kind: None,
+            is_visible_candidate: false,
+        }];
+
+        let update = BrowserEntry {
+            path: "/tmp/a".into(),
+            name: "a".into(),
+            size_bytes: 123,
+            reclaimable_bytes: 123,
+            size_complete: true,
+            entry_kind: EntryKind::CleanupCandidate,
+            git_status: GitStatus::Ignored,
+            git_context: GitContext::default(),
+            risk_level: RiskLevel::Low,
+            candidate_kind: Some("rust-target".into()),
+            is_visible_candidate: true,
+        };
+
+        apply_entry_update(&mut entries, &update);
+
+        assert_eq!(entries[0].size_bytes, 123);
+        assert_eq!(entries[0].reclaimable_bytes, 123);
+        assert_eq!(entries[0].git_status, GitStatus::Ignored);
+        assert_eq!(entries[0].risk_level, RiskLevel::Low);
+        assert_eq!(entries[0].entry_kind, EntryKind::CleanupCandidate);
+        assert_eq!(entries[0].candidate_kind.as_deref(), Some("rust-target"));
+        assert!(entries[0].is_visible_candidate);
+    }
+
+    #[test]
+    fn sort_entries_puts_parent_first_then_size_desc() {
+        let mut entries = vec![
+            BrowserEntry {
+                path: "/tmp/b".into(),
+                name: "b".into(),
+                size_bytes: 10,
+                reclaimable_bytes: 10,
+                size_complete: true,
+                entry_kind: EntryKind::Directory,
+                git_status: GitStatus::Unknown,
+                git_context: GitContext::default(),
+                risk_level: RiskLevel::Hidden,
+                candidate_kind: None,
+                is_visible_candidate: false,
+            },
+            BrowserEntry::parent("/tmp".into()),
+            BrowserEntry {
+                path: "/tmp/a".into(),
+                name: "a".into(),
+                size_bytes: 99,
+                reclaimable_bytes: 99,
+                size_complete: true,
+                entry_kind: EntryKind::Directory,
+                git_status: GitStatus::Unknown,
+                git_context: GitContext::default(),
+                risk_level: RiskLevel::Hidden,
+                candidate_kind: None,
+                is_visible_candidate: false,
+            },
+        ];
+
+        sort_entries(&mut entries);
+
+        assert_eq!(entries[0].entry_kind, EntryKind::Parent);
+        assert_eq!(entries[1].name, "a");
+        assert_eq!(entries[2].name, "b");
+    }
 }

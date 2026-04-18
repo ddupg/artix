@@ -2,7 +2,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 
-use artix::delete::{DeleteMode, delete_directories};
+use artix::config::{DeleteConfig, TrashBackend};
+use artix::delete::{DeleteMode, delete_directories_with_config};
 use tempfile::tempdir;
 
 // Regression: ISSUE-001 — trash delete failed in headless macOS sessions
@@ -21,15 +22,17 @@ fn trash_delete_uses_builtin_fallback_when_requested() {
 
     unsafe {
         env::set_var("HOME", &fake_home);
-        env::set_var("ARTIX_FORCE_BUILTIN_TRASH", "1");
     }
 
-    let result = delete_directories(std::slice::from_ref(&doomed), DeleteMode::Trash);
+    let result = delete_directories_with_config(
+        std::slice::from_ref(&doomed),
+        DeleteMode::Trash,
+        &DeleteConfig {
+            trash_backend: TrashBackend::Builtin,
+        },
+    );
 
     restore_env("HOME", original_home);
-    unsafe {
-        env::remove_var("ARTIX_FORCE_BUILTIN_TRASH");
-    }
 
     result.unwrap();
     assert!(!doomed.exists());

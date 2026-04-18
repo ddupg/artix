@@ -9,7 +9,7 @@ use artix::model::Project;
 use artix::model::{GitStatus, RiskLevel};
 use artix::scan::scan_workspace;
 use artix::ui::build_overview_rows;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 #[tokio::test]
 async fn scan_workspace_finds_target_and_classifies_minimally() {

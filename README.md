@@ -58,6 +58,68 @@
 - Node.js 的 `node_modules/`
 - Python 的 `.venv/`
 
+## 配置
+
+`artix` 现在使用 `TOML` 配置文件，而不是把运行时配置散落在环境变量里。
+
+### 配置文件路径
+
+- macOS：`~/Library/Application Support/artix/config.toml`
+- Linux：`$XDG_CONFIG_HOME/artix/config.toml`
+- Linux fallback：`~/.config/artix/config.toml`
+
+兼容读取顺序：
+
+1. 平台原生配置路径
+2. `~/.config/artix/config.toml`
+3. `~/.artix/config.toml`
+
+如果命中了兼容路径，`artix` 会继续读取，但会输出 warning，提示迁移到平台默认路径。
+
+### 配置示例
+
+```toml
+version = 1
+
+[ui]
+mode = "auto"   # auto | plain | tui
+icons = true
+
+[performance]
+fs_concurrency = 8
+git_concurrency = 4
+tui_entry_concurrency = 8
+
+[scan.tui_size_budget]
+max_entries = 1000000
+timeout_ms = 3000
+
+[delete]
+trash_backend = "auto"  # auto | builtin
+```
+
+### 当前支持的配置项
+
+- `[ui].mode`
+  - `auto`：交互终端里默认进 TUI；非交互终端走纯文本模式
+  - `plain`：总是走纯文本模式
+  - `tui`：总是尝试进入 TUI
+- `[ui].icons`
+  - 是否启用带 Nerd Font 的图标
+- `[performance].fs_concurrency`
+  - 文件系统相关并发度；默认 `available_parallelism * 2`，并 clamp 到 `[2, 16]`
+- `[performance].git_concurrency`
+  - Git 子进程并发度；默认 `available_parallelism`，并 clamp 到 `[2, 8]`
+- `[performance].tui_entry_concurrency`
+  - TUI 目录项后台补全并发度；默认 `available_parallelism * 2`，并 clamp 到 `[4, 32]`
+- `[scan.tui_size_budget].max_entries`
+  - TUI 中单目录 size 预算允许扫描的最大 entry 数；设为 `0` 表示不限制
+- `[scan.tui_size_budget].timeout_ms`
+  - TUI 中单目录 size 预算超时；设为 `0` 表示不超时
+- `[delete].trash_backend`
+  - `auto`：优先系统 trash，macOS 上失败时回退到内置 `~/.Trash`
+  - `builtin`：直接走内置 `~/.Trash`
+
 ## 如何运行
 
 ### 1. 构建
@@ -82,11 +144,14 @@ cargo run --quiet -- /path/to/workspace
 
 ### 3. 纯文本模式
 
-如果你在脚本里调用，或者只想保留旧的文本总览输出，可以设置：
+如果你在脚本里调用，或者只想保留旧的文本总览输出，推荐在配置文件里设置：
 
-```bash
-ARTIX_PLAIN=1 cargo run --quiet -- /path/to/workspace
+```toml
+[ui]
+mode = "plain"
 ```
+
+也可以在非交互终端下直接运行；此时 `auto` 模式会自动退回纯文本输出。
 
 输出格式仍然是：
 
@@ -114,15 +179,19 @@ ARTIX_PLAIN=1 cargo run --quiet -- /path/to/workspace
 核心模块：
 
 - [src/main.rs](/Users/bytedance/opensource/artix/src/main.rs)
-  入口。交互终端默认进 TUI，`ARTIX_PLAIN=1` 走纯文本 fallback。
+  入口。先加载配置文件，再决定进入 TUI 还是纯文本模式。
+- [src/config.rs](/Users/bytedance/opensource/artix/src/config.rs)
+  统一配置入口，负责默认值、配置文件路径解析和 `TOML` 反序列化。
 - [src/ui/mod.rs](/Users/bytedance/opensource/artix/src/ui/mod.rs)
-  TUI 状态、过滤模式、渲染和交互主循环。
+  TUI 状态、过滤模式、渲染和交互主循环；运行时通过 `AppContext` 共享配置与并发控制。
 - [src/delete_flow.rs](/Users/bytedance/opensource/artix/src/delete_flow.rs)
   删除状态机和删除动作执行。
 - [src/classify/git.rs](/Users/bytedance/opensource/artix/src/classify/git.rs)
   Git/worktree 上下文解析，以及目录的 Git 状态分类。
 - [src/scan/mod.rs](/Users/bytedance/opensource/artix/src/scan/mod.rs)
   扫描、项目汇总，以及目录浏览条目生成。
+- [src/scan/size.rs](/Users/bytedance/opensource/artix/src/scan/size.rs)
+  目录大小计算，以及 TUI 预算化 size 统计。
 - [src/model.rs](/Users/bytedance/opensource/artix/src/model.rs)
   领域模型和 `BrowserEntry` 视图模型。
 
@@ -142,6 +211,8 @@ cargo test --all-targets
 - 目录浏览排序和 `..` 行为
 - 过滤模式行为
 - 删除确认风险分支
+- 配置文件解析、默认值和兼容路径选择
+- 内置 trash backend 配置化回归
 - 纯文本 CLI fallback
 
 新增的关键测试文件：

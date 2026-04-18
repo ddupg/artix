@@ -12,10 +12,8 @@ pub struct IconMode {
 }
 
 impl IconMode {
-    pub fn detect() -> Self {
-        Self {
-            fancy: std::env::var("ARTIX_NO_ICONS").is_err(),
-        }
+    pub fn from_enabled(enabled: bool) -> Self {
+        Self { fancy: enabled }
     }
 
     pub fn is_fancy(&self) -> bool {
@@ -55,10 +53,10 @@ pub fn icon_for_entry(entry: &BrowserEntry) -> &'static str {
     if matches!(entry.entry_kind, EntryKind::Parent) {
         return nerd::PARENT;
     }
-    if let Some(kind) = &entry.candidate_kind {
-        if let Some(icon) = icon_by_candidate_kind(kind) {
-            return icon;
-        }
+    if let Some(kind) = &entry.candidate_kind
+        && let Some(icon) = icon_by_candidate_kind(kind)
+    {
+        return icon;
     }
     if let Some(icon) = icon_by_name(&entry.name) {
         return icon;

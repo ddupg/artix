@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use artix::classify::git::classify_path_git_status;
+use artix::config::AppContext;
 use artix::model::{GitContext, GitStatus};
 use tempfile::tempdir;
 
@@ -78,6 +79,9 @@ fn child_probe() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { classify_path_git_status(&root.join(".gstack"), Some(&context)).await });
+        .block_on(async {
+            let ctx = AppContext::default();
+            classify_path_git_status(&root.join(".gstack"), Some(&context), &ctx).await
+        });
     assert_eq!(status, GitStatus::Untracked);
 }

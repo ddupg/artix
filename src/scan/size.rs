@@ -3,9 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use std::sync::{Arc, OnceLock};
-
-use tokio::sync::Semaphore;
+use crate::config::{AppContext, Config, SizeBudgetConfig, SizeTraversalOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirSize {
@@ -20,36 +18,20 @@ struct SizeBudget {
 }
 
 impl SizeBudget {
-    fn from_env_for_tui() -> Self {
-        // Defaults are chosen to prevent pathological directories from hanging the UI
-        // while still allowing most directories to complete.
-        let remaining_entries = match std::env::var("ARTIX_SIZE_MAX_ENTRIES") {
-            Ok(value) => match value.parse::<u64>() {
-                Ok(0) | Err(_) => None,
-                Ok(n) => Some(n),
-            },
-            Err(_) => Some(1_000_000),
-        };
-
-        let deadline = match std::env::var("ARTIX_SIZE_TIMEOUT_MS") {
-            Ok(value) => match value.parse::<u64>() {
-                Ok(0) | Err(_) => None,
-                Ok(ms) => Some(Instant::now() + Duration::from_millis(ms)),
-            },
-            Err(_) => Some(Instant::now() + Duration::from_millis(3_000)),
-        };
-
+    fn from_config(config: SizeBudgetConfig) -> Self {
         Self {
-            remaining_entries,
-            deadline,
+            remaining_entries: config.max_entries,
+            deadline: config
+                .timeout_ms
+                .map(|ms| Instant::now() + Duration::from_millis(ms)),
         }
     }
 
     fn step(&mut self) -> bool {
-        if let Some(deadline) = self.deadline {
-            if Instant::now() > deadline {
-                return false;
-            }
+        if let Some(deadline) = self.deadline
+            && Instant::now() > deadline
+        {
+            return false;
         }
 
         if let Some(remaining) = &mut self.remaining_entries {
@@ -61,22 +43,6 @@ impl SizeBudget {
 
         true
     }
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var_os(name).is_some()
-}
-
-fn should_follow_symlinks() -> bool {
-    env_flag("ARTIX_SIZE_FOLLOW_SYMLINKS")
-}
-
-fn should_dedup_dir_inodes() -> bool {
-    // Enabled by default on unix; can be disabled for troubleshooting.
-    std::env::var("ARTIX_SIZE_DEDUP_DIR_INODES")
-        .ok()
-        .map(|value| value != "0")
-        .unwrap_or(true)
 }
 
 #[cfg(unix)]
@@ -92,8 +58,7 @@ fn dir_key(_meta: &fs::Metadata) -> Option<(u64, u64)> {
 
 fn dir_size_bytes_sync_inner(
     path: &Path,
-    follow_symlinks: bool,
-    dedup_dir_inodes: bool,
+    traversal: SizeTraversalOptions,
     visited_dirs: &mut HashSet<(u64, u64)>,
     budget: &mut Option<SizeBudget>,
 ) -> DirSize {
@@ -107,32 +72,29 @@ fn dir_size_bytes_sync_inner(
     let mut total = 0u64;
 
     for entry in entries.flatten() {
-        if let Some(budget) = budget.as_mut() {
-            if !budget.step() {
-                return DirSize {
-                    bytes: total,
-                    complete: false,
-                };
-            }
+        if let Some(budget) = budget.as_mut()
+            && !budget.step()
+        {
+            return DirSize {
+                bytes: total,
+                complete: false,
+            };
         }
 
         let entry_path = entry.path();
 
-        // Always lstat first so we can detect symlinks.
         let meta_link = match fs::symlink_metadata(&entry_path) {
             Ok(meta) => meta,
             Err(_) => continue,
         };
         let is_symlink = meta_link.file_type().is_symlink();
 
-        if is_symlink && !follow_symlinks {
-            // Count the symlink itself (small) but do not recurse into its target.
+        if is_symlink && !traversal.follow_symlinks {
             total = total.saturating_add(meta_link.len());
             continue;
         }
 
-        let meta = if is_symlink && follow_symlinks {
-            // Follow symlink to target.
+        let meta = if is_symlink && traversal.follow_symlinks {
             match fs::metadata(&entry_path) {
                 Ok(meta) => meta,
                 Err(_) => {
@@ -145,21 +107,14 @@ fn dir_size_bytes_sync_inner(
         };
 
         if meta.file_type().is_dir() {
-            if dedup_dir_inodes {
-                if let Some(key) = dir_key(&meta) {
-                    if !visited_dirs.insert(key) {
-                        continue;
-                    }
-                }
+            if traversal.dedup_dir_inodes
+                && let Some(key) = dir_key(&meta)
+                && !visited_dirs.insert(key)
+            {
+                continue;
             }
 
-            let sub = dir_size_bytes_sync_inner(
-                &entry_path,
-                follow_symlinks,
-                dedup_dir_inodes,
-                visited_dirs,
-                budget,
-            );
+            let sub = dir_size_bytes_sync_inner(&entry_path, traversal, visited_dirs, budget);
             total = total.saturating_add(sub.bytes);
             if !sub.complete {
                 return DirSize {
@@ -178,83 +133,45 @@ fn dir_size_bytes_sync_inner(
     }
 }
 
-pub(crate) fn dir_size_bytes_sync(path: &Path) -> u64 {
-    let follow_symlinks = should_follow_symlinks();
-    let dedup_dir_inodes = should_dedup_dir_inodes();
+fn dir_size_with_budget(
+    path: &Path,
+    traversal: SizeTraversalOptions,
+    budget: Option<SizeBudget>,
+) -> DirSize {
     let mut visited_dirs = HashSet::<(u64, u64)>::new();
-    let mut budget = None;
-
-    if dedup_dir_inodes {
-        if let Ok(meta) = fs::metadata(path) {
-            if let Some(key) = dir_key(&meta) {
-                let _ = visited_dirs.insert(key);
-            }
-        }
+    if traversal.dedup_dir_inodes
+        && let Ok(meta) = fs::metadata(path)
+        && let Some(key) = dir_key(&meta)
+    {
+        let _ = visited_dirs.insert(key);
     }
 
-    dir_size_bytes_sync_inner(
-        path,
-        follow_symlinks,
-        dedup_dir_inodes,
-        &mut visited_dirs,
-        &mut budget,
-    )
-    .bytes
+    let mut budget = budget;
+    dir_size_bytes_sync_inner(path, traversal, &mut visited_dirs, &mut budget)
 }
 
-static SIZE_CONCURRENCY: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-fn size_semaphore() -> Arc<Semaphore> {
-    SIZE_CONCURRENCY
-        .get_or_init(|| Arc::new(Semaphore::new(size_concurrency_limit())))
-        .clone()
+pub(crate) fn dir_size_bytes_sync_with_config(path: &Path, config: &Config) -> u64 {
+    dir_size_with_budget(path, config.scan.size_traversal, None).bytes
 }
 
-fn size_concurrency_limit() -> usize {
-    let default = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let default = (default.saturating_mul(2)).clamp(2, 16);
-
-    std::env::var("ARTIX_FS_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
-pub async fn dir_size_bytes(path: &Path) -> u64 {
-    let sem = size_semaphore();
+pub async fn dir_size_bytes(path: &Path, ctx: &AppContext) -> u64 {
+    let sem = ctx.fs_semaphore();
     let _permit = sem.acquire().await.expect("semaphore must not be closed");
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || dir_size_bytes_sync(&path))
+    let config = ctx.config().clone();
+    tokio::task::spawn_blocking(move || dir_size_bytes_sync_with_config(&path, &config))
         .await
         .unwrap_or(0)
 }
 
-pub async fn dir_size_bytes_budgeted(path: &Path) -> DirSize {
-    let sem = size_semaphore();
+pub async fn dir_size_bytes_budgeted(path: &Path, ctx: &AppContext) -> DirSize {
+    let sem = ctx.fs_semaphore();
     let _permit = sem.acquire().await.expect("semaphore must not be closed");
     let path: PathBuf = path.to_path_buf();
+    let config = ctx.config().clone();
     tokio::task::spawn_blocking(move || {
-        let follow_symlinks = should_follow_symlinks();
-        let dedup_dir_inodes = should_dedup_dir_inodes();
-        let mut visited_dirs = HashSet::<(u64, u64)>::new();
-        if dedup_dir_inodes {
-            if let Ok(meta) = fs::metadata(&path) {
-                if let Some(key) = dir_key(&meta) {
-                    let _ = visited_dirs.insert(key);
-                }
-            }
-        }
-        let mut budget = Some(SizeBudget::from_env_for_tui());
-        dir_size_bytes_sync_inner(
-            &path,
-            follow_symlinks,
-            dedup_dir_inodes,
-            &mut visited_dirs,
-            &mut budget,
-        )
+        let budget = Some(SizeBudget::from_config(config.scan.tui_size_budget));
+        dir_size_with_budget(&path, config.scan.size_traversal, budget)
     })
     .await
     .unwrap_or(DirSize {

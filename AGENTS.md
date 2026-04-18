@@ -8,8 +8,8 @@ This file is a high-level, repo-specific architecture overview for agents and co
 
 The binary has two execution modes (see `src/main.rs`):
 
-- **Interactive TUI (default):** Runs when stdout is a terminal and `ARTIX_PLAIN` is not set.
-- **Plain text overview:** Runs when stdout is not a terminal or `ARTIX_PLAIN` is set. Output format is tab-separated: `<project_name>\t<reclaimable_bytes>\t<candidate_count>` (documented in `README.md`).
+- **Interactive TUI:** Runs when `[ui].mode = "tui"`, or when `[ui].mode = "auto"` and stdout is a terminal.
+- **Plain text overview:** Runs when `[ui].mode = "plain"`, or when `[ui].mode = "auto"` and stdout is not a terminal. Output format is tab-separated: `<project_name>\t<reclaimable_bytes>\t<candidate_count>` (documented in `README.md`).
 
 ### Core boundaries
 
@@ -78,7 +78,7 @@ The subprocess output is suppressed and calls are timeout-limited (2 seconds) (s
 
 - Build: `cargo build`
 - Run TUI: `cargo run --quiet` (optionally `cargo run --quiet -- /path/to/workspace`)
-- Run plain text mode: `ARTIX_PLAIN=1 cargo run --quiet -- /path/to/workspace`
+- Run plain text mode: set `[ui].mode = "plain"` in `config.toml`
 - Run tests: `cargo test --all-targets`
 
 ### CI / Release
@@ -103,7 +103,7 @@ Tests are written with Rust’s built-in test harness:
 - Integration tests live under `tests/` and include both sync `#[test]` and async `#[tokio::test]` cases.
 - `tempfile` is used for filesystem fixtures.
 - Some tests invoke the system `git` binary (e.g. `tests/git_context_test.rs` creates a worktree); ensure `git` is available in PATH when running tests.
-- Some regression tests manipulate environment variables (e.g. `ARTIX_FORCE_BUILTIN_TRASH`, `HOME`) and restore them afterwards (see `tests/delete_trash_regression_test.rs`).
+- Some regression tests manipulate environment variables (e.g. `HOME`) and restore them afterwards (see `tests/delete_trash_regression_test.rs`).
 
 ## 5) Security
 
@@ -117,13 +117,10 @@ Git status classification in the UI depends on executing `git` from PATH (see `s
 
 ## 6) Configuration
 
-Configuration is primarily through environment variables:
+Configuration is primarily through `config.toml` loaded by `src/config.rs`.
 
-- `ARTIX_PLAIN`: When set, disables the TUI and prints the plain text overview (see `src/main.rs`).
-- `ARTIX_FS_CONCURRENCY`: Limits concurrency for filesystem-heavy work (directory sizing and parts of scanning). Default is `available_parallelism * 2`, clamped to `[2, 16]` (see `src/scan/mod.rs` and `src/scan/size.rs`).
-- `ARTIX_GIT_CONCURRENCY`: Limits concurrent `git` subprocess calls used for per-path Git status. Default is `available_parallelism`, clamped to `[2, 8]` (see `src/classify/git.rs`).
-- `ARTIX_FORCE_BUILTIN_TRASH`: Forces the built-in trash implementation (used by regression tests; implemented in `src/delete.rs`).
-- `ARTIX_NO_ICONS`: Disables “fancy” icons in the UI theme (see `src/ui/theme.rs`).
+- **Primary config path:** `ProjectDirs::from("", "", "artix").config_dir().join("config.toml")` (for example, `~/Library/Application Support/artix/config.toml` on macOS).
+- **Compatibility lookup order:** primary platform path, then `~/.config/artix/config.toml`, then `~/.artix/config.toml`.
+- **Supported user-facing fields:** `version`, `[ui].mode`, `[ui].icons`, `[performance].fs_concurrency`, `[performance].git_concurrency`, `[performance].tui_entry_concurrency`, `[scan.tui_size_budget].max_entries`, `[scan.tui_size_budget].timeout_ms`, `[delete].trash_backend`.
 
-There is no external rules/config file: built-in candidate rules are defined in `src/rules.rs`.
-
+Built-in candidate rules are still defined in `src/rules.rs`; the move to `config.toml` did not introduce an external rules file.
