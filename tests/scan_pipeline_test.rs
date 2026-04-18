@@ -9,6 +9,7 @@ use artix::model::Project;
 use artix::model::{GitStatus, RiskLevel};
 use artix::scan::scan_workspace;
 use artix::ui::build_overview_rows;
+use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn scan_workspace_finds_target_and_classifies_minimally() {
@@ -183,6 +184,94 @@ async fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
     assert_eq!(project_summary.candidate_count, 1);
 
     fs::remove_dir_all(&workspace).expect("cleanup temp project");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scan_workspace_size_does_not_follow_symlink_cycles() {
+    use std::os::unix::fs::symlink;
+
+    let project = make_temp_project();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    fs::write(project.join(".gitignore"), "target/\n").expect("write .gitignore");
+
+    let target_dir = project.join("target");
+    let target_file = target_dir.join("debug/app");
+    fs::create_dir_all(target_file.parent().expect("target debug dir"))
+        .expect("create target/debug");
+    fs::write(&target_file, "binary").expect("write target/debug/app");
+
+    // Create a cycle: target/loop -> .. (project root).
+    symlink("..", target_dir.join("loop")).expect("create symlink cycle");
+
+    let report = timeout(
+        Duration::from_secs(2),
+        scan_workspace(std::slice::from_ref(&project)),
+    )
+    .await
+    .expect("scan_workspace should not hang on symlink cycles");
+
+    let candidate = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.rule_id == "rust.target")
+        .expect("rust.target candidate");
+
+    // "binary" is 6 bytes, and we only count the symlink itself (".." -> len 2).
+    assert_eq!(candidate.size_bytes, 8);
+
+    fs::remove_dir_all(&project).expect("cleanup temp project");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scan_workspace_size_does_not_follow_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let project = make_temp_project();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    fs::write(project.join(".gitignore"), "target/\n").expect("write .gitignore");
+
+    let target_dir = project.join("target");
+    let target_file = target_dir.join("debug/app");
+    fs::create_dir_all(target_file.parent().expect("target debug dir"))
+        .expect("create target/debug");
+    fs::write(&target_file, "binary").expect("write target/debug/app");
+
+    // Create an "escape" directory with a large file.
+    let escape_dir = project.join("escape");
+    fs::create_dir_all(&escape_dir).expect("create escape dir");
+    fs::write(escape_dir.join("big.bin"), vec![0u8; 1024 * 1024]).expect("write big file");
+
+    // target/escape_link -> ../escape; this must not pull escape/ into target size.
+    let link_target = "../escape";
+    symlink(link_target, target_dir.join("escape_link")).expect("create symlink escape");
+
+    let report = timeout(
+        Duration::from_secs(2),
+        scan_workspace(std::slice::from_ref(&project)),
+    )
+    .await
+    .expect("scan_workspace should finish");
+
+    let candidate = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.rule_id == "rust.target")
+        .expect("rust.target candidate");
+
+    // 6 bytes for "binary" + symlink metadata length for "../escape".
+    assert_eq!(candidate.size_bytes, 6 + link_target.len() as u64);
+
+    fs::remove_dir_all(&project).expect("cleanup temp project");
 }
 
 #[test]

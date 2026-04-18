@@ -23,6 +23,7 @@ use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project, Risk
 use crate::rules::default_rules;
 
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 pub use crate::delete_flow::{DeleteIntent, DeleteState, DeleteTargetKind};
 
@@ -373,6 +374,18 @@ enum BgResponse {
     },
 }
 
+fn tui_entry_concurrency_limit() -> usize {
+    let default = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let default = (default.saturating_mul(2)).clamp(4, 32);
+    std::env::var("ARTIX_TUI_ENTRY_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
 impl BrowserApp {
     fn new(start_dir: PathBuf) -> Result<Self, String> {
         let (bg_tx, mut bg_req_rx) = mpsc::unbounded_channel::<BgRequest>();
@@ -380,12 +393,17 @@ impl BrowserApp {
 
         let root_dir = start_dir.clone();
         tokio::spawn(async move {
+            let mut active_load: Option<tokio::task::JoinHandle<()>> = None;
             while let Some(req) = bg_req_rx.recv().await {
                 match req {
                     BgRequest::LoadDirectory { request_id, dir } => {
+                        if let Some(handle) = active_load.take() {
+                            handle.abort();
+                        }
                         let root_dir = root_dir.clone();
                         let bg_resp_tx = bg_resp_tx.clone();
-                        tokio::spawn(async move {
+                        let entry_limit = tui_entry_concurrency_limit();
+                        active_load = Some(tokio::spawn(async move {
                             // Send a quick listing first (0B sizes) so UI can populate even if
                             // the in-thread quick path failed.
                             let initial = quick_browse_directory(&dir, &root_dir);
@@ -402,7 +420,20 @@ impl BrowserApp {
                             let rules = default_rules();
                             let current_context = resolve_git_context(&dir);
 
+                            let mut jobs = JoinSet::new();
                             for entry in read_dir.flatten() {
+                                while jobs.len() >= entry_limit {
+                                    if let Some(res) = jobs.join_next().await {
+                                        if let Ok(Some(entry)) = res {
+                                            let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
+                                                request_id,
+                                                dir: dir.clone(),
+                                                entry,
+                                            });
+                                        }
+                                    }
+                                }
+
                                 let entry_path = entry.path();
                                 if !entry_path.is_dir() {
                                     continue;
@@ -427,48 +458,49 @@ impl BrowserApp {
                                     candidate_rule.as_ref().map(|rule| rule.kind.to_string());
                                 let is_visible_candidate = candidate_rule.is_some();
 
-                                let dir_for_msg = dir.clone();
                                 let current_context = current_context.clone();
-                                let bg_resp_tx = bg_resp_tx.clone();
-
-                                tokio::spawn(async move {
-                                    let size_bytes =
-                                        crate::scan::size::dir_size_bytes(&entry_path).await;
-                                    let git_context = resolve_git_context(&entry_path)
-                                        .or_else(|| current_context);
-                                    let git_status =
-                                        crate::classify::git::classify_path_git_status(
-                                            &entry_path,
-                                            git_context.as_ref(),
-                                        )
+                                jobs.spawn(async move {
+                                    let size = crate::scan::size::dir_size_bytes_budgeted(&entry_path)
                                         .await;
+                                    let git_context =
+                                        resolve_git_context(&entry_path).or_else(|| current_context);
+                                    let git_status = crate::classify::git::classify_path_git_status(
+                                        &entry_path,
+                                        git_context.as_ref(),
+                                    )
+                                    .await;
 
                                     let risk_level = candidate_rule
                                         .as_ref()
                                         .map(|rule| classify_risk_level(rule, &git_status))
                                         .unwrap_or(RiskLevel::Hidden);
 
-                                    let entry = BrowserEntry {
+                                    Some(BrowserEntry {
                                         path: entry_path,
                                         name,
-                                        size_bytes,
-                                        reclaimable_bytes: size_bytes,
+                                        size_bytes: size.bytes,
+                                        reclaimable_bytes: size.bytes,
+                                        size_complete: size.complete,
                                         entry_kind,
                                         git_status,
                                         git_context: git_context.unwrap_or_default(),
                                         risk_level,
                                         candidate_kind,
                                         is_visible_candidate,
-                                    };
-
-                                    let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
-                                        request_id,
-                                        dir: dir_for_msg,
-                                        entry,
-                                    });
+                                    })
                                 });
                             }
-                        });
+
+                            while let Some(res) = jobs.join_next().await {
+                                if let Ok(Some(entry)) = res {
+                                    let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
+                                        request_id,
+                                        dir: dir.clone(),
+                                        entry,
+                                    });
+                                }
+                            }
+                        }));
                     }
                     BgRequest::Delete {
                         request_id,
@@ -761,6 +793,7 @@ fn quick_browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<BrowserEnt
             name,
             size_bytes: 0,
             reclaimable_bytes: 0,
+            size_complete: true,
             entry_kind,
             git_status: GitStatus::Unknown,
             git_context: git_context.unwrap_or_default(),
@@ -800,6 +833,7 @@ fn apply_entry_update(entries: &mut [BrowserEntry], update: &BrowserEntry) {
         if entry.path == update.path {
             entry.size_bytes = update.size_bytes;
             entry.reclaimable_bytes = update.reclaimable_bytes;
+            entry.size_complete = update.size_complete;
             entry.git_status = update.git_status.clone();
             entry.git_context = update.git_context.clone();
             entry.risk_level = update.risk_level.clone();
@@ -824,6 +858,7 @@ mod tests {
             name: "a".into(),
             size_bytes: 0,
             reclaimable_bytes: 0,
+            size_complete: true,
             entry_kind: EntryKind::Directory,
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
@@ -837,6 +872,7 @@ mod tests {
             name: "a".into(),
             size_bytes: 123,
             reclaimable_bytes: 123,
+            size_complete: true,
             entry_kind: EntryKind::CleanupCandidate,
             git_status: GitStatus::Ignored,
             git_context: GitContext::default(),
@@ -864,6 +900,7 @@ mod tests {
                 name: "b".into(),
                 size_bytes: 10,
                 reclaimable_bytes: 10,
+                size_complete: true,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -877,6 +914,7 @@ mod tests {
                 name: "a".into(),
                 size_bytes: 99,
                 reclaimable_bytes: 99,
+                size_complete: true,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -1081,7 +1119,11 @@ fn list_item_for_entry(
         if loading_paths.contains(&entry.path) && !matches!(entry.entry_kind, EntryKind::Parent) {
             spinner_label(spinner_tick).to_string()
         } else {
-            human_bytes(entry.reclaimable_bytes)
+            let mut label = human_bytes(entry.reclaimable_bytes);
+            if !entry.size_complete && !matches!(entry.entry_kind, EntryKind::Parent) {
+                label.push('~');
+            }
+            label
         };
 
     let mut spans = vec![Span::styled(
@@ -1164,12 +1206,22 @@ fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize)
 
 fn render_context(state: &AppState) -> Paragraph<'static> {
     let lines = if let Some(entry) = state.selected_entry() {
+        let size_label = if entry.size_complete {
+            human_bytes(entry.size_bytes)
+        } else {
+            format!("{} (partial)", human_bytes(entry.size_bytes))
+        };
+        let reclaimable_label = if entry.size_complete {
+            human_bytes(entry.reclaimable_bytes)
+        } else {
+            format!("{} (partial)", human_bytes(entry.reclaimable_bytes))
+        };
         vec![
             Line::raw(format!("path: {}", entry.path.display())),
-            Line::raw(format!("size: {}", human_bytes(entry.size_bytes))),
+            Line::raw(format!("size: {}", size_label)),
             Line::raw(format!(
                 "reclaimable: {}",
-                human_bytes(entry.reclaimable_bytes)
+                reclaimable_label
             )),
             Line::raw(format!("git: {:?}", entry.git_status)),
             Line::raw(format!(

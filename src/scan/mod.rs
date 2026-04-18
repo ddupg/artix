@@ -76,6 +76,7 @@ pub async fn browse_directory(path: &Path, root_dir: &Path) -> Result<Vec<Browse
                 name,
                 size_bytes,
                 reclaimable_bytes: size_bytes,
+                size_complete: true,
                 entry_kind,
                 git_status,
                 git_context: git_context.unwrap_or_default(),

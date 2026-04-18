@@ -178,6 +178,7 @@ fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
         name: name.to_string(),
         size_bytes,
         reclaimable_bytes: size_bytes,
+        size_complete: true,
         entry_kind: EntryKind::Directory,
         git_status,
         git_context: GitContext::default(),
