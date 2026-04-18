@@ -6,6 +6,36 @@ use artix::config::render_default_config_toml;
 use tempfile::tempdir;
 
 #[test]
+fn help_command_lists_available_features() {
+    let output = Command::new(artix_bin_path())
+        .arg("help")
+        .output()
+        .expect("run artix help");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("artix init-config"));
+    assert!(stdout.contains("--print-default-config"));
+    assert!(stdout.contains("Primary path: ~/.config/artix/config.toml"));
+}
+
+#[test]
+fn short_help_flag_prints_help_text() {
+    let output = Command::new(artix_bin_path())
+        .arg("-h")
+        .output()
+        .expect("run artix -h");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("COMMANDS:"));
+    assert!(stdout.contains("help                    Show this help text"));
+}
+
+#[test]
 fn print_default_config_outputs_rendered_toml() {
     let output = Command::new(artix_bin_path())
         .arg("--print-default-config")

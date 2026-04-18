@@ -14,6 +14,7 @@ enum CliCommand {
     Run { roots: Vec<PathBuf> },
     InitConfig,
     PrintDefaultConfig,
+    Help,
 }
 
 #[tokio::main]
@@ -41,6 +42,10 @@ async fn main() {
         }
         CliCommand::PrintDefaultConfig => {
             print!("{}", render_default_config_toml());
+            return;
+        }
+        CliCommand::Help => {
+            print!("{}", render_help_text());
             return;
         }
         CliCommand::Run { roots } => {
@@ -101,6 +106,33 @@ fn parse_cli_command() -> Result<CliCommand, String> {
     parse_cli_command_from(std::env::args_os().skip(1).collect())
 }
 
+fn render_help_text() -> String {
+    concat!(
+        "artix - developer workspace cleanup TUI\n\n",
+        "USAGE:\n",
+        "    artix [PATH ...]\n",
+        "    artix init-config\n",
+        "    artix --print-default-config\n",
+        "    artix help\n",
+        "    artix -h | --help\n\n",
+        "COMMANDS:\n",
+        "    help                    Show this help text\n",
+        "    init-config             Write a default config file to ~/.config/artix/config.toml\n\n",
+        "FLAGS:\n",
+        "    -h, --help              Show this help text\n",
+        "        --print-default-config\n",
+        "                            Print the default TOML config to stdout\n\n",
+        "BEHAVIOR:\n",
+        "    With no command, artix scans the current directory.\n",
+        "    In [ui].mode = \"auto\", it runs the TUI on interactive stdout and\n",
+        "    falls back to plain tab-separated output otherwise.\n\n",
+        "CONFIG PATHS:\n",
+        "    Primary path: ~/.config/artix/config.toml\n",
+        "    Fallback path: ~/.artix/config.toml\n",
+    )
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CliCommand, parse_cli_command_from};
@@ -122,6 +154,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_help_command() {
+        let command = parse_cli_command_from(vec![OsString::from("help")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Help));
+    }
+
+    #[test]
+    fn parse_short_help_flag() {
+        let command = parse_cli_command_from(vec![OsString::from("-h")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Help));
+    }
+
+    #[test]
     fn reject_extra_args_for_print_default_config() {
         let err = parse_cli_command_from(vec![
             OsString::from("--print-default-config"),
@@ -130,6 +176,17 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "--print-default-config does not accept additional arguments");
+    }
+
+    #[test]
+    fn reject_extra_args_for_help_command() {
+        let err = parse_cli_command_from(vec![
+            OsString::from("help"),
+            OsString::from("/tmp/workspace"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err, "help does not accept additional arguments");
     }
 
     #[test]
@@ -161,6 +218,13 @@ fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
         return Ok(CliCommand::InitConfig);
     }
 
+    if args[0] == OsString::from("help") {
+        if args.len() != 1 {
+            return Err("help does not accept additional arguments".to_string());
+        }
+        return Ok(CliCommand::Help);
+    }
+
     if args
         .iter()
         .any(|arg| arg == OsStr::new("--print-default-config"))
@@ -169,6 +233,16 @@ fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
             return Err("--print-default-config does not accept additional arguments".to_string());
         }
         return Ok(CliCommand::PrintDefaultConfig);
+    }
+
+    if args
+        .iter()
+        .any(|arg| arg == OsStr::new("--help") || arg == OsStr::new("-h"))
+    {
+        if args.len() != 1 {
+            return Err("help does not accept additional arguments".to_string());
+        }
+        return Ok(CliCommand::Help);
     }
 
     Ok(CliCommand::Run {

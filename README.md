@@ -133,6 +133,21 @@ trash_backend = "auto"  # auto | builtin
 
 ## 如何运行
 
+### 0. 查看帮助
+
+```bash
+artix help
+```
+
+也支持：
+
+```bash
+artix --help
+artix -h
+```
+
+帮助输出会列出当前已有的 CLI 功能，包括：扫描路径、`init-config`、`--print-default-config` 和配置文件位置。
+
 ### 1. 构建
 
 ```bash
