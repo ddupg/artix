@@ -119,8 +119,8 @@ Git status classification in the UI depends on executing `git` from PATH (see `s
 
 Configuration is primarily through `config.toml` loaded by `src/config.rs`.
 
-- **Primary config path:** `ProjectDirs::from("", "", "artix").config_dir().join("config.toml")` (for example, `~/Library/Application Support/artix/config.toml` on macOS).
-- **Compatibility lookup order:** primary platform path, then `~/.config/artix/config.toml`, then `~/.artix/config.toml`.
+- **Default config path:** `~/.config/artix/config.toml`.
+- **Compatibility lookup order:** `~/.config/artix/config.toml`, then `~/.artix/config.toml`.
 - **Supported user-facing fields:** `version`, `[ui].mode`, `[ui].icons`, `[performance].fs_concurrency`, `[performance].git_concurrency`, `[performance].tui_entry_concurrency`, `[scan.tui_size_budget].max_entries`, `[scan.tui_size_budget].timeout_ms`, `[delete].trash_backend`.
 
 Built-in candidate rules are still defined in `src/rules.rs`; the move to `config.toml` did not introduce an external rules file.

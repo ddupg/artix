@@ -64,17 +64,28 @@
 
 ### 配置文件路径
 
-- macOS：`~/Library/Application Support/artix/config.toml`
-- Linux：`$XDG_CONFIG_HOME/artix/config.toml`
-- Linux fallback：`~/.config/artix/config.toml`
+- 默认路径：`~/.config/artix/config.toml`
+- 兼容旧路径：`~/.artix/config.toml`
 
-兼容读取顺序：
+读取顺序：
 
-1. 平台原生配置路径
-2. `~/.config/artix/config.toml`
-3. `~/.artix/config.toml`
+1. `~/.config/artix/config.toml`
+2. `~/.artix/config.toml`
 
-如果命中了兼容路径，`artix` 会继续读取，但会输出 warning，提示迁移到平台默认路径。
+如果命中了 `~/.artix/config.toml`，`artix` 会继续读取，但会输出 warning，提示迁移到 `~/.config/artix/config.toml`。
+
+### 生成默认配置
+
+- 初始化默认配置到平台主路径：`artix init-config`
+- 仅把默认配置打印到 stdout：`artix --print-default-config`
+
+例如你想先预览再手动写入：
+
+```bash
+artix --print-default-config
+```
+
+`init-config` 只会在还没有现有配置文件时写入；如果上述任一路径下已经存在配置文件，它会直接报错，避免覆盖现有配置。
 
 ### 配置示例
 

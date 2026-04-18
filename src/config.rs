@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use directories::{BaseDirs, ProjectDirs};
+use directories::BaseDirs;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 
@@ -135,7 +135,6 @@ pub struct ConfigLoadReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigPathKind {
     Primary,
-    CompatXdg,
     CompatDotfile,
 }
 
@@ -231,6 +230,35 @@ impl Config {
     }
 }
 
+pub fn default_config_path() -> Result<PathBuf, String> {
+    home_dir()
+        .map(|home| home.join(".config").join("artix").join(CONFIG_FILE_NAME))
+        .ok_or_else(|| "could not determine the home directory for config path".to_string())
+}
+
+pub fn render_default_config_toml() -> String {
+    let config = Config::default();
+
+    format!(
+        "version = {}\n\n[ui]\nmode = \"{}\"   # auto | plain | tui\nicons = {}\n\n[performance]\nfs_concurrency = {}\ngit_concurrency = {}\ntui_entry_concurrency = {}\n\n[scan.tui_size_budget]\nmax_entries = {}\ntimeout_ms = {}\n\n[delete]\ntrash_backend = \"{}\"  # auto | builtin\n",
+        config.version,
+        config.ui.mode.as_toml_value(),
+        config.ui.icons,
+        config.performance.fs_concurrency,
+        config.performance.git_concurrency,
+        config.performance.tui_entry_concurrency,
+        config.scan.tui_size_budget.max_entries.unwrap_or(0),
+        config.scan.tui_size_budget.timeout_ms.unwrap_or(0),
+        config.delete.trash_backend.as_toml_value(),
+    )
+}
+
+pub fn init_default_config_file() -> Result<PathBuf, String> {
+    let target_path = default_config_path()?;
+    let existing_path = discover_existing_config_path().map(|(path, _)| path);
+    init_default_config_file_at(target_path, existing_path)
+}
+
 impl AppContext {
     pub fn new(config: Config) -> Self {
         Self {
@@ -253,6 +281,25 @@ impl AppContext {
     }
 }
 
+impl UiMode {
+    fn as_toml_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Plain => "plain",
+            Self::Tui => "tui",
+        }
+    }
+}
+
+impl TrashBackend {
+    fn as_toml_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Builtin => "builtin",
+        }
+    }
+}
+
 pub fn load_config() -> Result<ConfigLoadReport, String> {
     let mut warnings = Vec::new();
     let existing = discover_existing_config_path();
@@ -265,9 +312,9 @@ pub fn load_config() -> Result<ConfigLoadReport, String> {
                 warnings.push(format!(
                     "config loaded from compatibility path {}; prefer {}",
                     path.display(),
-                    primary_config_path()
+                    default_config_path()
                         .map(|value| value.display().to_string())
-                        .unwrap_or_else(|| "the platform default config path".to_string())
+                        .unwrap_or_else(|_| "~/.config/artix/config.toml".to_string())
                 ));
             }
             toml::from_str::<RawConfigFile>(&contents)
@@ -322,29 +369,19 @@ fn discover_existing_config_path() -> Option<(PathBuf, ConfigPathKind)> {
 }
 
 fn candidate_config_paths() -> Vec<(PathBuf, ConfigPathKind)> {
-    candidate_config_paths_for(primary_config_path(), home_dir())
+    candidate_config_paths_for(home_dir())
 }
 
-fn candidate_config_paths_for(
-    primary: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-) -> Vec<(PathBuf, ConfigPathKind)> {
+fn candidate_config_paths_for(home_dir: Option<PathBuf>) -> Vec<(PathBuf, ConfigPathKind)> {
     let mut seen = HashSet::<PathBuf>::new();
     let mut paths = Vec::new();
-
-    if let Some(path) = primary {
-        push_config_path(&mut paths, &mut seen, path, ConfigPathKind::Primary);
-    }
 
     if let Some(home_dir) = home_dir {
         push_config_path(
             &mut paths,
             &mut seen,
-            home_dir
-                .join(".config")
-                .join("artix")
-                .join(CONFIG_FILE_NAME),
-            ConfigPathKind::CompatXdg,
+            home_dir.join(".config").join("artix").join(CONFIG_FILE_NAME),
+            ConfigPathKind::Primary,
         );
         push_config_path(
             &mut paths,
@@ -368,8 +405,27 @@ fn push_config_path(
     }
 }
 
-fn primary_config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "artix").map(|dirs| dirs.config_dir().join(CONFIG_FILE_NAME))
+fn init_default_config_file_at(
+    target_path: PathBuf,
+    existing_path: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = existing_path {
+        return Err(format!("config file already exists at {}", path.display()));
+    }
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create config directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&target_path, render_default_config_toml())
+        .map_err(|err| format!("failed to write config file {}: {err}", target_path.display()))?;
+
+    Ok(target_path)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -380,9 +436,11 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use super::{
         AppContext, CONFIG_FILE_NAME, Config, ConfigPathKind, TrashBackend, UiMode,
-        candidate_config_paths_for,
+        candidate_config_paths_for, init_default_config_file_at, render_default_config_toml,
     };
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn config_from_toml_parses_expected_fields() {
@@ -433,22 +491,25 @@ fs_concurrency = 0
     }
 
     #[test]
-    fn candidate_config_paths_prefer_primary_then_compatibility_paths() {
-        let primary = Some(PathBuf::from("/primary/artix/config.toml"));
+    fn render_default_config_round_trips_through_parser() {
+        let rendered = render_default_config_toml();
+        let parsed = Config::from_toml_str(&rendered).unwrap();
+
+        assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn candidate_config_paths_prefer_xdg_then_dotfile_paths() {
         let home = Some(PathBuf::from("/Users/tester"));
 
-        let paths = candidate_config_paths_for(primary, home);
+        let paths = candidate_config_paths_for(home);
 
         assert_eq!(
             paths,
             vec![
                 (
-                    PathBuf::from("/primary/artix/config.toml"),
-                    ConfigPathKind::Primary,
-                ),
-                (
                     PathBuf::from(format!("/Users/tester/.config/artix/{CONFIG_FILE_NAME}")),
-                    ConfigPathKind::CompatXdg,
+                    ConfigPathKind::Primary,
                 ),
                 (
                     PathBuf::from(format!("/Users/tester/.artix/{CONFIG_FILE_NAME}")),
@@ -468,5 +529,31 @@ fs_concurrency = 0
 
         assert_eq!(ctx.fs_semaphore().available_permits(), 6);
         assert_eq!(ctx.git_semaphore().available_permits(), 5);
+    }
+
+    #[test]
+    fn init_default_config_writes_rendered_contents() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("artix/config.toml");
+
+        let written = init_default_config_file_at(target.clone(), None).unwrap();
+        let contents = fs::read_to_string(&target).unwrap();
+
+        assert_eq!(written, target);
+        assert_eq!(contents, render_default_config_toml());
+    }
+
+    #[test]
+    fn init_default_config_rejects_existing_config_path() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("artix/config.toml");
+        let existing = dir.path().join(".artix/config.toml");
+
+        let err = init_default_config_file_at(target, Some(existing.clone())).unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("config file already exists at {}", existing.display())
+        );
     }
 }
