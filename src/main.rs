@@ -28,18 +28,16 @@ async fn main() {
     };
 
     match command {
-        CliCommand::InitConfig => {
-            match init_default_config_file() {
-                Ok(path) => {
-                    println!("initialized config at {}", path.display());
-                    return;
-                }
-                Err(err) => {
-                    eprintln!("artix: {err}");
-                    std::process::exit(1);
-                }
+        CliCommand::InitConfig => match init_default_config_file() {
+            Ok(path) => {
+                println!("initialized config at {}", path.display());
+                return;
             }
-        }
+            Err(err) => {
+                eprintln!("artix: {err}");
+                std::process::exit(1);
+            }
+        },
         CliCommand::PrintDefaultConfig => {
             print!("{}", render_default_config_toml());
             return;
@@ -133,92 +131,19 @@ fn render_help_text() -> String {
     .to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{CliCommand, parse_cli_command_from};
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    #[test]
-    fn parse_init_config_command() {
-        let command = parse_cli_command_from(vec![OsString::from("init-config")]).unwrap();
-
-        assert!(matches!(command, CliCommand::InitConfig));
-    }
-
-    #[test]
-    fn parse_print_default_config_flag() {
-        let command = parse_cli_command_from(vec![OsString::from("--print-default-config")]).unwrap();
-
-        assert!(matches!(command, CliCommand::PrintDefaultConfig));
-    }
-
-    #[test]
-    fn parse_help_command() {
-        let command = parse_cli_command_from(vec![OsString::from("help")]).unwrap();
-
-        assert!(matches!(command, CliCommand::Help));
-    }
-
-    #[test]
-    fn parse_short_help_flag() {
-        let command = parse_cli_command_from(vec![OsString::from("-h")]).unwrap();
-
-        assert!(matches!(command, CliCommand::Help));
-    }
-
-    #[test]
-    fn reject_extra_args_for_print_default_config() {
-        let err = parse_cli_command_from(vec![
-            OsString::from("--print-default-config"),
-            OsString::from("/tmp/workspace"),
-        ])
-        .unwrap_err();
-
-        assert_eq!(err, "--print-default-config does not accept additional arguments");
-    }
-
-    #[test]
-    fn reject_extra_args_for_help_command() {
-        let err = parse_cli_command_from(vec![
-            OsString::from("help"),
-            OsString::from("/tmp/workspace"),
-        ])
-        .unwrap_err();
-
-        assert_eq!(err, "help does not accept additional arguments");
-    }
-
-    #[test]
-    fn parse_paths_as_run_command() {
-        let command = parse_cli_command_from(vec![
-            OsString::from("/tmp/a"),
-            OsString::from("/tmp/b"),
-        ])
-        .unwrap();
-
-        match command {
-            CliCommand::Run { roots } => {
-                assert_eq!(roots, vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-}
-
 fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
     if args.is_empty() {
         return Ok(CliCommand::Run { roots: Vec::new() });
     }
 
-    if args[0] == OsString::from("init-config") {
+    if args[0] == "init-config" {
         if args.len() != 1 {
             return Err("init-config does not accept additional arguments".to_string());
         }
         return Ok(CliCommand::InitConfig);
     }
 
-    if args[0] == OsString::from("help") {
+    if args[0] == "help" {
         if args.len() != 1 {
             return Err("help does not accept additional arguments".to_string());
         }
@@ -248,4 +173,82 @@ fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
     Ok(CliCommand::Run {
         roots: args.into_iter().map(PathBuf::from).collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliCommand, parse_cli_command_from};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_init_config_command() {
+        let command = parse_cli_command_from(vec![OsString::from("init-config")]).unwrap();
+
+        assert!(matches!(command, CliCommand::InitConfig));
+    }
+
+    #[test]
+    fn parse_print_default_config_flag() {
+        let command =
+            parse_cli_command_from(vec![OsString::from("--print-default-config")]).unwrap();
+
+        assert!(matches!(command, CliCommand::PrintDefaultConfig));
+    }
+
+    #[test]
+    fn parse_help_command() {
+        let command = parse_cli_command_from(vec![OsString::from("help")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Help));
+    }
+
+    #[test]
+    fn parse_short_help_flag() {
+        let command = parse_cli_command_from(vec![OsString::from("-h")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Help));
+    }
+
+    #[test]
+    fn reject_extra_args_for_print_default_config() {
+        let err = parse_cli_command_from(vec![
+            OsString::from("--print-default-config"),
+            OsString::from("/tmp/workspace"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "--print-default-config does not accept additional arguments"
+        );
+    }
+
+    #[test]
+    fn reject_extra_args_for_help_command() {
+        let err = parse_cli_command_from(vec![
+            OsString::from("help"),
+            OsString::from("/tmp/workspace"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err, "help does not accept additional arguments");
+    }
+
+    #[test]
+    fn parse_paths_as_run_command() {
+        let command =
+            parse_cli_command_from(vec![OsString::from("/tmp/a"), OsString::from("/tmp/b")])
+                .unwrap();
+
+        match command {
+            CliCommand::Run { roots } => {
+                assert_eq!(
+                    roots,
+                    vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+                );
+            }
+            _ => panic!("expected run command"),
+        }
+    }
 }

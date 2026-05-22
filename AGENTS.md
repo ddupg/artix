@@ -20,6 +20,7 @@ The library exposes these top-level modules (see `src/lib.rs`):
 - `scan`: Workspace scanning and directory browsing.
 - `classify`: Git/worktree context, ownership heuristics, and risk classification.
 - `ui`: TUI state, rendering, and event loop.
+- `clean`: Current-directory project/language detection plus clean command planning and execution.
 - `delete` / `delete_flow`: Delete execution + confirmation state machine.
 
 ### Data model
@@ -30,6 +31,7 @@ Important types (see `src/model.rs`):
 - `CandidateDir`: A discovered “cleanup candidate” directory with owner project root, size, rule id, Git status, and risk level.
 - `Project`: Aggregated per-project totals (name, reclaimable bytes, candidate count).
 - `GitContext`: Repo/worktree roots plus branch/head metadata.
+- `ProjectProfile` / `CleanPlan`: Current TUI directory project metadata and the clean commands available for that exact directory.
 
 ### Scanning pipeline (plain-text mode)
 
@@ -49,17 +51,25 @@ The TUI loop lives in `ui::run_tui` / `run_app` (see `src/ui/mod.rs`). A `Browse
 
 - `AppState`: current directory, entries, filter mode, selection index, and delete dialog state.
 - An in-memory cache mapping `PathBuf -> Vec<BrowserEntry>`.
+- A project-profile cache mapping the current directory to optional clean/language metadata.
 - A background request/response channel that streams directory load results and per-entry updates.
 
 Directory loading is intentionally two-phase (see `BrowserApp::load_directory` and the background `BgRequest::LoadDirectory` worker in `src/ui/mod.rs`):
 
 - **Quick placeholder listing**: returns entries with `size_bytes = 0` and `git_status = Unknown` so the UI becomes usable immediately.
 - **Progressive enrichment**: per-entry tasks compute size + Git status and send `EntryUpdated` messages; the UI applies updates, resorts, and preserves the selected entry.
+- **Project profile enrichment**: the current directory itself is checked for project markers (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle(.kts)`, `pyproject.toml`) and language summary/clean plan metadata is streamed back separately. This does not walk upward to find a parent project and does not recursively clean child projects.
 
 Deletion is also handled asynchronously:
 
 - UI triggers delete confirmation state transitions (`delete_flow`).
 - Actual deletion executes in a blocking task (`execute_delete`) and then the UI invalidates affected cache entries and refreshes the current directory.
+
+Clean is handled asynchronously as a separate TUI state:
+
+- Idle `x` opens a clean confirmation only when the current directory has a detected project profile and a non-empty clean plan.
+- `y` confirms clean in the clean dialog; `Esc` cancels/dismisses.
+- Clean commands run with `cwd` set to the current directory/project root and then invalidate affected cache entries.
 
 ### Git/worktree context + Git status
 
@@ -111,9 +121,13 @@ This project can delete directories. Key safety-related behaviors are implemente
 
 - **Permanent delete requires explicit confirmation** at the API level (`DeleteMode::Permanent { confirmed: bool }` in `src/delete.rs` rejects `confirmed=false`).
 - **UI delete flow adds stronger confirmation** for `Tracked`/`Unknown` Git status (see `delete_flow::delete_intent_for` in `src/delete_flow.rs`).
+- **TUI delete keybindings:** `d` opens delete confirmation, `t` moves to trash, and `y` requests permanent delete; tracked/unknown permanent delete still requires the extra `y` confirmation.
 - **Trash delete** uses the `trash` crate and can fall back to a built-in macOS `~/.Trash` move; built-in trash uses `HOME` (see `src/delete.rs`).
+- **TUI clean keybinding:** idle `x` is reserved for current-directory clean, not permanent delete. Clean is only available when the current directory itself is a detected project root with an executable clean plan.
 
 Git status classification in the UI depends on executing `git` from PATH (see `src/classify/git.rs`). Subprocess output is suppressed and calls are timeout-limited, but agents should be aware that PATH influences which `git` executable is used.
+
+Clean command execution also depends on tools from PATH or local wrappers (`cargo`, `mvn`/`mvnw`, `gradle`/`gradlew`, package managers). Output is captured for UI summaries; avoid adding silent clean paths.
 
 ## 6) Configuration
 

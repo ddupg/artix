@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -17,6 +17,9 @@ use ratatui::widgets::{
 
 use crate::classify::git::resolve_git_context;
 use crate::classify::risk::classify_risk_level;
+use crate::clean::{
+    CleanPlan, CleanRunSummary, ProjectProfile, detect_project_profile, execute_clean_plan,
+};
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{delete_intent_for, execute_delete_with_config};
@@ -27,6 +30,23 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 pub use crate::delete_flow::{DeleteIntent, DeleteState, DeleteTargetKind};
+
+const CLEAN_FINISHED_DISMISS_AFTER: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanState {
+    Idle,
+    Confirming {
+        plan: CleanPlan,
+    },
+    Running {
+        plan: CleanPlan,
+    },
+    Finished {
+        summary: CleanRunSummary,
+        dismiss_at: Instant,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewRow {
@@ -67,21 +87,25 @@ impl FilterMode {
 pub struct AppState {
     current_dir: PathBuf,
     current_git_context: GitContext,
+    current_project_profile: Option<ProjectProfile>,
     entries: Vec<BrowserEntry>,
     filter_mode: FilterMode,
     selected_index: usize,
     delete_state: DeleteState,
+    clean_state: CleanState,
 }
 
 impl AppState {
     pub fn new(current_dir: PathBuf, entries: Vec<BrowserEntry>) -> Self {
         Self {
             current_git_context: resolve_git_context(&current_dir).unwrap_or_default(),
+            current_project_profile: None,
             current_dir,
             entries,
             filter_mode: FilterMode::All,
             selected_index: 0,
             delete_state: DeleteState::Idle,
+            clean_state: CleanState::Idle,
         }
     }
 
@@ -95,9 +119,20 @@ impl AppState {
 
     pub fn replace_entries(&mut self, current_dir: PathBuf, entries: Vec<BrowserEntry>) {
         self.current_git_context = resolve_git_context(&current_dir).unwrap_or_default();
+        self.current_project_profile = None;
         self.current_dir = current_dir;
         self.entries = entries;
         self.selected_index = 0;
+    }
+
+    pub fn replace_entries_preserving_selection(
+        &mut self,
+        current_dir: PathBuf,
+        entries: Vec<BrowserEntry>,
+        selected_path: Option<&Path>,
+    ) {
+        self.replace_entries(current_dir, entries);
+        self.restore_selection_by_path(selected_path);
     }
 
     pub fn filter_mode(&self) -> FilterMode {
@@ -106,6 +141,18 @@ impl AppState {
 
     pub fn current_git_context(&self) -> &GitContext {
         &self.current_git_context
+    }
+
+    pub fn current_project_profile(&self) -> Option<&ProjectProfile> {
+        self.current_project_profile.as_ref()
+    }
+
+    pub fn set_current_project_profile(&mut self, profile: Option<ProjectProfile>) {
+        self.current_project_profile = profile;
+        if !self.can_clean_current_dir() && !matches!(self.clean_state, CleanState::Finished { .. })
+        {
+            self.clean_state = CleanState::Idle;
+        }
     }
 
     pub fn set_filter_mode(&mut self, filter_mode: FilterMode) {
@@ -189,6 +236,57 @@ impl AppState {
         &self.delete_state
     }
 
+    pub fn clean_state(&self) -> &CleanState {
+        &self.clean_state
+    }
+
+    pub fn can_clean_current_dir(&self) -> bool {
+        self.current_project_profile
+            .as_ref()
+            .is_some_and(ProjectProfile::can_clean)
+    }
+
+    pub fn request_clean_current_dir(&mut self) {
+        if !matches!(self.delete_state, DeleteState::Idle)
+            || !matches!(
+                self.clean_state,
+                CleanState::Idle | CleanState::Finished { .. }
+            )
+        {
+            return;
+        }
+        let Some(profile) = &self.current_project_profile else {
+            return;
+        };
+        if !profile.can_clean() {
+            return;
+        }
+        self.clean_state = CleanState::Confirming {
+            plan: profile.clean_plan.clone(),
+        };
+    }
+
+    pub fn set_clean_running(&mut self) {
+        if let CleanState::Confirming { plan } = &self.clean_state {
+            self.clean_state = CleanState::Running { plan: plan.clone() };
+        }
+    }
+
+    pub fn finish_clean(&mut self, summary: CleanRunSummary, now: Instant) {
+        self.clean_state = CleanState::Finished {
+            summary,
+            dismiss_at: now + CLEAN_FINISHED_DISMISS_AFTER,
+        };
+    }
+
+    pub fn dismiss_expired_clean_result(&mut self, now: Instant) {
+        if let CleanState::Finished { dismiss_at, .. } = &self.clean_state
+            && now >= *dismiss_at
+        {
+            self.clean_state = CleanState::Idle;
+        }
+    }
+
     pub fn set_delete_mode(&mut self, mode: DeleteMode) {
         if let DeleteState::Confirming { requested_mode, .. } = &mut self.delete_state {
             *requested_mode = Some(mode);
@@ -233,6 +331,11 @@ impl AppState {
         self.delete_state = DeleteState::Idle;
     }
 
+    pub fn clear_transient_state(&mut self) {
+        self.delete_state = DeleteState::Idle;
+        self.clean_state = CleanState::Idle;
+    }
+
     fn is_visible(&self, entry: &BrowserEntry) -> bool {
         if matches!(entry.entry_kind, EntryKind::Parent) {
             return true;
@@ -254,6 +357,20 @@ impl AppState {
             self.selected_index = 0;
         } else {
             self.selected_index = self.selected_index.min(len - 1);
+        }
+    }
+
+    fn restore_selection_by_path(&mut self, selected_path: Option<&Path>) {
+        let Some(selected_path) = selected_path else {
+            self.clamp_selection();
+            return;
+        };
+
+        let visible = self.visible_entries();
+        if let Some(idx) = visible.iter().position(|entry| entry.path == selected_path) {
+            self.selected_index = idx;
+        } else {
+            self.clamp_selection();
         }
     }
 }
@@ -292,6 +409,7 @@ fn run_app(
 
     loop {
         app.pump_background();
+        app.state.dismiss_expired_clean_result(Instant::now());
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &app))?;
 
@@ -320,14 +438,14 @@ fn run_app(
             }
             KeyCode::Char('f') => app.state.cycle_filter_mode(),
             KeyCode::Char('d') => app.state.request_delete_for_selected(),
+            KeyCode::Char('x') => app.state.request_clean_current_dir(),
             KeyCode::Char('t') => app
                 .run_delete(DeleteMode::Trash)
                 .map_err(io::Error::other)?,
-            KeyCode::Char('x') => app
-                .run_delete(DeleteMode::Permanent { confirmed: true })
-                .map_err(io::Error::other)?,
-            KeyCode::Char('y') => app.confirm_extra_delete().map_err(io::Error::other)?,
-            KeyCode::Esc => app.state.clear_delete_state(),
+            KeyCode::Char('y') => {
+                app.confirm_action().map_err(io::Error::other)?;
+            }
+            KeyCode::Esc => app.state.clear_transient_state(),
             _ => {}
         }
     }
@@ -341,6 +459,7 @@ struct BrowserApp {
     ctx: AppContext,
     root_dir: PathBuf,
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
+    profile_cache: HashMap<PathBuf, Option<ProjectProfile>>,
     icon_mode: theme::IconMode,
 
     bg_tx: mpsc::UnboundedSender<BgRequest>,
@@ -348,6 +467,7 @@ struct BrowserApp {
     next_request_id: u64,
     pending_load_id: Option<u64>,
     pending_delete_id: Option<u64>,
+    pending_clean_id: Option<u64>,
 
     loading_paths: HashSet<PathBuf>,
     spinner_tick: usize,
@@ -364,6 +484,10 @@ enum BgRequest {
         entry: Box<BrowserEntry>,
         mode: DeleteMode,
     },
+    Clean {
+        request_id: u64,
+        plan: CleanPlan,
+    },
 }
 
 #[derive(Debug)]
@@ -378,10 +502,20 @@ enum BgResponse {
         dir: PathBuf,
         entry: Box<BrowserEntry>,
     },
+    ProjectProfileLoaded {
+        request_id: u64,
+        dir: PathBuf,
+        result: Result<Option<ProjectProfile>, String>,
+    },
     DeleteFinished {
         request_id: u64,
         entry_path: PathBuf,
         result: Result<String, String>,
+    },
+    CleanFinished {
+        request_id: u64,
+        project_root: PathBuf,
+        summary: CleanRunSummary,
     },
 }
 
@@ -413,6 +547,23 @@ impl BrowserApp {
                                 request_id,
                                 dir: dir.clone(),
                                 result: initial,
+                            });
+
+                            let profile_tx = bg_resp_tx.clone();
+                            let profile_scan_dir = dir.clone();
+                            let profile_response_dir = dir.clone();
+                            tokio::spawn(async move {
+                                let profile_result = tokio::task::spawn_blocking(move || {
+                                    detect_project_profile(&profile_scan_dir)
+                                })
+                                .await
+                                .map_err(|err| err.to_string())
+                                .and_then(|result| result);
+                                let _ = profile_tx.send(BgResponse::ProjectProfileLoaded {
+                                    request_id,
+                                    dir: profile_response_dir,
+                                    result: profile_result,
+                                });
                             });
 
                             // Then progressively compute size/git per entry and stream updates.
@@ -532,6 +683,18 @@ impl BrowserApp {
                             });
                         });
                     }
+                    BgRequest::Clean { request_id, plan } => {
+                        let bg_resp_tx = bg_resp_tx.clone();
+                        tokio::spawn(async move {
+                            let project_root = plan.project_root.clone();
+                            let summary = execute_clean_plan(plan).await;
+                            let _ = bg_resp_tx.send(BgResponse::CleanFinished {
+                                request_id,
+                                project_root,
+                                summary,
+                            });
+                        });
+                    }
                 }
             }
         });
@@ -541,6 +704,7 @@ impl BrowserApp {
             ctx,
             root_dir: start_dir.clone(),
             cache: HashMap::new(),
+            profile_cache: HashMap::new(),
             icon_mode,
 
             bg_tx,
@@ -548,6 +712,7 @@ impl BrowserApp {
             next_request_id: 1,
             pending_load_id: None,
             pending_delete_id: None,
+            pending_clean_id: None,
 
             loading_paths: HashSet::new(),
             spinner_tick: 0,
@@ -604,6 +769,20 @@ impl BrowserApp {
                     self.resort_visible_entries_preserving_selection();
                     self.loading_paths.remove(&entry.path);
                 }
+                BgResponse::ProjectProfileLoaded {
+                    request_id,
+                    dir,
+                    result,
+                } => {
+                    if self.pending_load_id != Some(request_id) {
+                        continue;
+                    }
+                    let profile = result.unwrap_or(None);
+                    self.profile_cache.insert(dir.clone(), profile.clone());
+                    if self.state.current_dir() == dir.as_path() {
+                        self.state.set_current_project_profile(profile);
+                    }
+                }
                 BgResponse::DeleteFinished {
                     request_id,
                     entry_path,
@@ -623,6 +802,22 @@ impl BrowserApp {
                         }
                         Err(err) => self.state.finish_delete_failure(err),
                     }
+                }
+                BgResponse::CleanFinished {
+                    request_id,
+                    project_root,
+                    summary,
+                } => {
+                    if self.pending_clean_id != Some(request_id) {
+                        continue;
+                    }
+                    self.pending_clean_id = None;
+                    self.invalidate_related_paths(&project_root);
+                    self.profile_cache.remove(&project_root);
+                    self.state.finish_clean(summary, Instant::now());
+                    let current = self.state.current_dir().to_path_buf();
+                    let selected_path = self.state.selected_entry().map(|entry| entry.path);
+                    self.load_directory_preserving_selection(current, selected_path);
                 }
             }
         }
@@ -649,9 +844,30 @@ impl BrowserApp {
     }
 
     fn load_directory(&mut self, dir: PathBuf) {
+        self.load_directory_preserving_selection(dir, None);
+    }
+
+    fn load_directory_preserving_selection(
+        &mut self,
+        dir: PathBuf,
+        selected_path: Option<PathBuf>,
+    ) {
         self.loading_paths.clear();
+        if self.state.current_dir() != dir.as_path() {
+            self.state.clean_state = CleanState::Idle;
+        }
         if let Some(entries) = self.cache.get(&dir).cloned() {
-            self.state.replace_entries(dir, entries);
+            self.state.replace_entries_preserving_selection(
+                dir.clone(),
+                entries,
+                selected_path.as_deref(),
+            );
+            let profile = self
+                .profile_cache
+                .get(self.state.current_dir())
+                .cloned()
+                .unwrap_or(None);
+            self.state.set_current_project_profile(profile);
             self.loading_paths.extend(
                 self.state
                     .entries()
@@ -660,13 +876,19 @@ impl BrowserApp {
                     .filter(|entry| entry.size_bytes == 0 && entry.git_status == GitStatus::Unknown)
                     .map(|entry| entry.path.clone()),
             );
-            return;
+            if self.profile_cache.contains_key(self.state.current_dir()) {
+                return;
+            }
         }
 
         // Provide a fast placeholder listing so the UI is immediately usable.
         if let Ok(entries) = quick_browse_directory(&dir, &self.root_dir, &self.ctx) {
             self.cache.insert(dir.clone(), entries.clone());
-            self.state.replace_entries(dir.clone(), entries);
+            self.state.replace_entries_preserving_selection(
+                dir.clone(),
+                entries,
+                selected_path.as_deref(),
+            );
             self.loading_paths.extend(
                 self.state
                     .entries()
@@ -676,7 +898,11 @@ impl BrowserApp {
             );
         } else {
             // Optimistically switch directory; entries will be populated asynchronously.
-            self.state.replace_entries(dir.clone(), Vec::new());
+            self.state.replace_entries_preserving_selection(
+                dir.clone(),
+                Vec::new(),
+                selected_path.as_deref(),
+            );
         }
 
         let request_id = self.next_request_id;
@@ -731,6 +957,31 @@ impl BrowserApp {
                     mode,
                 });
                 Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn confirm_action(&mut self) -> Result<(), String> {
+        match self.state.clean_state() {
+            CleanState::Confirming { plan } => {
+                let plan = plan.clone();
+                self.state.set_clean_running();
+                let request_id = self.next_request_id;
+                self.next_request_id = self.next_request_id.saturating_add(1);
+                self.pending_clean_id = Some(request_id);
+                let _ = self.bg_tx.send(BgRequest::Clean { request_id, plan });
+                Ok(())
+            }
+            _ if matches!(
+                self.state.delete_state(),
+                DeleteState::AwaitingExtraConfirmation { .. }
+            ) =>
+            {
+                self.confirm_extra_delete()
+            }
+            _ if matches!(self.state.delete_state(), DeleteState::Confirming { .. }) => {
+                self.run_delete(DeleteMode::Permanent { confirmed: true })
             }
             _ => Ok(()),
         }
@@ -902,6 +1153,10 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
         let popup = centered_rect(area, 70, 45);
         frame.render_widget(Clear, popup);
         frame.render_widget(render_delete_dialog(app.state.delete_state()), popup);
+    } else if !matches!(app.state.clean_state(), CleanState::Idle) {
+        let popup = centered_rect(area, 70, 45);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(render_clean_dialog(app.state.clean_state()), popup);
     }
 }
 
@@ -1144,7 +1399,7 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
         } else {
             format!("{} (partial)", human_bytes(entry.reclaimable_bytes))
         };
-        vec![
+        let mut lines = vec![
             Line::raw(format!("path: {}", entry.path.display())),
             Line::raw(format!("size: {}", size_label)),
             Line::raw(format!("reclaimable: {}", reclaimable_label)),
@@ -1175,7 +1430,33 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
                 "candidate: {}",
                 entry.candidate_kind.unwrap_or_else(|| "directory".into())
             )),
-        ]
+        ];
+
+        if let Some(profile) = state.current_project_profile() {
+            lines.push(Line::raw(format!("project: {}", profile.kind_label())));
+            lines.push(Line::raw(format!(
+                "languages: {}",
+                profile.language_label()
+            )));
+            let clean_label = if profile.can_clean() {
+                profile
+                    .clean_plan
+                    .commands
+                    .iter()
+                    .map(|command| command.display())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            } else {
+                "none".to_string()
+            };
+            lines.push(Line::raw(format!("clean: {clean_label}")));
+        } else {
+            lines.push(Line::raw("project: —"));
+            lines.push(Line::raw("languages: —"));
+            lines.push(Line::raw("clean: —"));
+        }
+
+        lines
     } else {
         vec![Line::raw("No entry selected")]
     };
@@ -1186,14 +1467,23 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let hint = match state.delete_state() {
-        DeleteState::Idle => {
-            "q quit | j/k move | g/G first/last | enter open | h back | f filter | d delete"
+    let hint = match (state.delete_state(), state.clean_state()) {
+        (DeleteState::Idle, CleanState::Idle) => {
+            if state.can_clean_current_dir() {
+                "q quit | j/k move | enter open | h back | f filter | d delete | x clean"
+            } else {
+                "q quit | j/k move | enter open | h back | f filter | d delete"
+            }
         }
-        DeleteState::Confirming { .. } => "t trash | x permanent | esc cancel",
-        DeleteState::AwaitingExtraConfirmation { .. } => "y confirm dangerous delete | esc cancel",
-        DeleteState::Running { .. } => "running delete...",
-        DeleteState::Failed { .. } => "esc dismiss",
+        (DeleteState::Confirming { .. }, _) => "t trash | y permanent | esc cancel",
+        (DeleteState::AwaitingExtraConfirmation { .. }, _) => {
+            "y confirm dangerous delete | esc cancel"
+        }
+        (DeleteState::Running { .. }, _) => "running delete...",
+        (DeleteState::Failed { .. }, _) => "esc dismiss",
+        (DeleteState::Idle, CleanState::Confirming { .. }) => "y run clean | esc cancel",
+        (DeleteState::Idle, CleanState::Running { .. }) => "running clean...",
+        (DeleteState::Idle, CleanState::Finished { .. }) => "clean result closes automatically",
     };
 
     let block = Block::default().borders(Borders::ALL).title("Keys");
@@ -1225,7 +1515,8 @@ fn render_delete_dialog(state: &DeleteState) -> Paragraph<'static> {
                 }
             )),
             Line::raw("t: move to trash"),
-            Line::raw("x: permanent delete"),
+            Line::raw("y: permanent delete"),
+            Line::raw("esc: cancel"),
         ],
         DeleteState::AwaitingExtraConfirmation { entry, .. } => vec![
             Line::raw(format!("Dangerous delete for {}", entry.path.display())),
@@ -1242,6 +1533,56 @@ fn render_delete_dialog(state: &DeleteState) -> Paragraph<'static> {
     Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("Delete"))
         .wrap(Wrap { trim: true })
+}
+
+fn render_clean_dialog(state: &CleanState) -> Paragraph<'static> {
+    let lines = match state {
+        CleanState::Confirming { plan } => {
+            let mut lines = vec![
+                Line::raw(format!("Clean {}", plan.project_root.display())),
+                Line::raw("Commands:"),
+            ];
+            for command in &plan.commands {
+                lines.push(Line::raw(format!("  {}", command.display())));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::raw("y: run clean"));
+            lines.push(Line::raw("esc: cancel"));
+            lines
+        }
+        CleanState::Running { plan } => {
+            let first = plan
+                .commands
+                .first()
+                .map(|command| command.display())
+                .unwrap_or_else(|| "clean".to_string());
+            vec![Line::raw(format!("Running {first} ..."))]
+        }
+        CleanState::Finished {
+            summary,
+            dismiss_at,
+        } => vec![
+            Line::raw(summary.message()),
+            Line::raw(format!(
+                "Closing in {}s",
+                clean_result_remaining_secs(*dismiss_at, Instant::now())
+            )),
+        ],
+        CleanState::Idle => vec![Line::raw("")],
+    };
+
+    Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Clean"))
+        .wrap(Wrap { trim: true })
+}
+
+fn clean_result_remaining_secs(dismiss_at: Instant, now: Instant) -> u64 {
+    let remaining = dismiss_at.saturating_duration_since(now);
+    if remaining.is_zero() {
+        0
+    } else {
+        remaining.as_secs().saturating_add(1)
+    }
 }
 
 fn centered_rect(

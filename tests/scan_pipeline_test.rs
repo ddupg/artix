@@ -103,7 +103,7 @@ async fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
             .candidates
             .iter()
             .map(|candidate| candidate.size_bytes)
-            .sum()
+            .sum::<u64>()
     );
 
     let rows = build_overview_rows(report.projects.clone());

@@ -45,10 +45,18 @@
 ### 安全删除
 
 - `d` 进入删除确认
-- `t` 走系统废纸篓
-- `x` 走永久删除
-- tracked / unknown 目标会进入更强确认路径
+- 删除确认框中按 `t` 移动到系统废纸篓
+- 删除确认框中按 `y` 永久删除；tracked / unknown 目标会进入更强确认路径
 - 删除后会局部失效并刷新当前目录，而不是全盘重扫
+
+### 多语言 clean
+
+- 当前浏览目录本身是 Rust / Java / Node / Python 项目根时，右侧 Context 会显示项目类型和语言摘要
+- 空闲态按 `x` 会对当前目录触发 clean 确认；没有探测到语言/项目类型时，`x` 不触发
+- Rust 执行 `cargo clean`
+- Java 执行 Maven / Gradle 的 `clean`，优先使用 `mvnw` / `gradlew`
+- Node 只在 `package.json` 声明了 `scripts.clean` 时执行对应包管理器的 `run clean`
+- Python v1 只展示项目类型，不执行 clean 命令
 
 ### 规则识别
 
@@ -194,9 +202,9 @@ mode = "plain"
 - `Backspace` / `h` / 左键：返回上级目录
 - `f`：切换过滤模式
 - `d`：打开删除确认
-- `t`：确认移动到废纸篓
-- `x`：请求永久删除
-- `y`：确认高风险永久删除
+- `t`：在删除确认框中移动到废纸篓
+- `y`：在删除确认框中永久删除，或在 clean 确认框中执行 clean
+- `x`：当前目录是可 clean 项目根时，打开 clean 确认
 - `Esc`：关闭弹窗
 - `q`：退出
 
@@ -237,6 +245,7 @@ cargo test --all-targets
 - 目录浏览排序和 `..` 行为
 - 过滤模式行为
 - 删除确认风险分支
+- 多语言项目 clean planning 和 TUI clean 状态
 - 配置文件解析、默认值和兼容路径选择
 - 内置 trash backend 配置化回归
 - 纯文本 CLI fallback
