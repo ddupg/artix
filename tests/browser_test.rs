@@ -96,3 +96,40 @@ async fn browse_directory_sorts_cleanup_candidates_by_size() {
     assert_eq!(names[1], ("node_modules", EntryKind::CleanupCandidate));
     assert_eq!(names[2], ("src", EntryKind::Directory));
 }
+
+#[tokio::test]
+async fn browse_directory_includes_files_and_sorts_by_size() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(root.join("target/debug")).expect("create target");
+    fs::create_dir_all(root.join("small-dir")).expect("create small dir");
+    fs::write(root.join("large.log"), "x".repeat(50)).expect("write large file");
+    fs::write(root.join(".gitignore"), "target\n").expect("write gitignore");
+    fs::write(root.join("target/debug/app"), "x".repeat(20)).expect("write target");
+    fs::write(root.join("small-dir/file.txt"), "x").expect("write small dir file");
+
+    let entries = browse_directory(&root, &root)
+        .await
+        .expect("browse directory");
+    let names = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.name.as_str(),
+                entry.entry_kind.clone(),
+                entry.size_bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names[0].0, "large.log");
+    assert_eq!(names[0].1, EntryKind::File);
+    assert_eq!(names[0].2, 50);
+    assert_eq!(names[1].0, "target");
+    assert_eq!(names[1].1, EntryKind::CleanupCandidate);
+    assert!(
+        names
+            .iter()
+            .any(|(name, kind, _)| { *name == ".gitignore" && matches!(kind, EntryKind::File) })
+    );
+}

@@ -32,10 +32,19 @@ pub fn delete_directories_with_config(
             }
 
             for path in paths {
-                fs::remove_dir_all(path).map_err(|err| err.to_string())?;
+                delete_path_permanently(path)?;
             }
             Ok(())
         }
+    }
+}
+
+fn delete_path_permanently(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path).map_err(|err| err.to_string())
+    } else {
+        fs::remove_file(path).map_err(|err| err.to_string())
     }
 }
 

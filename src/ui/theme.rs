@@ -27,6 +27,7 @@ impl IconMode {
 
 mod nerd {
     pub const PARENT: &str = "\u{f062}"; // FA arrow-up
+    pub const FILE: &str = "\u{f016}"; // FA file-o
     pub const FOLDER: &str = "\u{f115}"; // FA folder-open
     pub const GIT: &str = "\u{f1d3}"; // FA git-square
     pub const GITHUB: &str = "\u{f408}"; // FA github
@@ -52,6 +53,9 @@ mod nerd {
 pub fn icon_for_entry(entry: &BrowserEntry) -> &'static str {
     if matches!(entry.entry_kind, EntryKind::Parent) {
         return nerd::PARENT;
+    }
+    if matches!(entry.entry_kind, EntryKind::File) {
+        return nerd::FILE;
     }
     if let Some(kind) = &entry.candidate_kind
         && let Some(icon) = icon_by_candidate_kind(kind)
@@ -124,6 +128,7 @@ mod colors {
 
     // Parent
     pub const PARENT: Color = Color::DarkGray;
+    pub const FILE: Color = Color::Indexed(252); // Grey82 #d0d0d0
 
     // Other UI elements
     pub const SIZE: Color = Color::Indexed(183); // Thistle1 #d7afff
@@ -159,6 +164,9 @@ pub fn name_style(entry: &BrowserEntry, is_selected: bool) -> Style {
 fn name_color(entry: &BrowserEntry) -> Color {
     if matches!(entry.entry_kind, EntryKind::Parent) {
         return colors::PARENT;
+    }
+    if matches!(entry.entry_kind, EntryKind::File) {
+        return colors::FILE;
     }
 
     // Candidate kinds get language-specific colors

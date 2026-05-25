@@ -588,7 +588,9 @@ impl BrowserApp {
                                 }
 
                                 let entry_path = entry.path();
-                                if !entry_path.is_dir() {
+                                let is_dir = entry_path.is_dir();
+                                let is_file = entry_path.is_file();
+                                if !is_dir && !is_file {
                                     continue;
                                 }
                                 let name = entry_path
@@ -596,13 +598,18 @@ impl BrowserApp {
                                     .and_then(|name| name.to_str())
                                     .unwrap_or("unknown")
                                     .to_string();
-                                if name == ".git" {
+                                if is_dir && name == ".git" {
                                     continue;
                                 }
 
-                                let candidate_rule =
-                                    rules.iter().find(|rule| rule.dir_name == name).cloned();
-                                let entry_kind = if candidate_rule.is_some() {
+                                let candidate_rule = if is_dir {
+                                    rules.iter().find(|rule| rule.dir_name == name).cloned()
+                                } else {
+                                    None
+                                };
+                                let entry_kind = if is_file {
+                                    EntryKind::File
+                                } else if candidate_rule.is_some() {
                                     EntryKind::CleanupCandidate
                                 } else {
                                     EntryKind::Directory
@@ -614,11 +621,21 @@ impl BrowserApp {
                                 let current_context = current_context.clone();
                                 let ctx = ctx.clone();
                                 jobs.spawn(async move {
-                                    let size = crate::scan::size::dir_size_bytes_budgeted(
-                                        &entry_path,
-                                        &ctx,
-                                    )
-                                    .await;
+                                    let (size_bytes, size_complete) = if is_file {
+                                        (
+                                            std::fs::metadata(&entry_path)
+                                                .map(|metadata| metadata.len())
+                                                .unwrap_or(0),
+                                            true,
+                                        )
+                                    } else {
+                                        let size = crate::scan::size::dir_size_bytes_budgeted(
+                                            &entry_path,
+                                            &ctx,
+                                        )
+                                        .await;
+                                        (size.bytes, size.complete)
+                                    };
                                     let git_context =
                                         resolve_git_context(&entry_path).or(current_context);
                                     let git_status =
@@ -637,9 +654,9 @@ impl BrowserApp {
                                     Some(BrowserEntry {
                                         path: entry_path,
                                         name,
-                                        size_bytes: size.bytes,
-                                        reclaimable_bytes: size.bytes,
-                                        size_complete: size.complete,
+                                        size_bytes,
+                                        reclaimable_bytes: size_bytes,
+                                        size_complete,
                                         entry_kind,
                                         git_status,
                                         git_context: git_context.unwrap_or_default(),
@@ -827,6 +844,9 @@ impl BrowserApp {
         let Some(entry) = self.state.selected_entry() else {
             return Ok(());
         };
+        if matches!(entry.entry_kind, EntryKind::File) {
+            return Ok(());
+        }
         self.load_directory(entry.path);
         Ok(())
     }
@@ -1033,7 +1053,9 @@ fn quick_browse_directory(
     let read_dir = std::fs::read_dir(path).map_err(|err| err.to_string())?;
     for entry in read_dir.flatten() {
         let entry_path = entry.path();
-        if !entry_path.is_dir() {
+        let is_dir = entry_path.is_dir();
+        let is_file = entry_path.is_file();
+        if !is_dir && !is_file {
             continue;
         }
 
@@ -1042,12 +1064,18 @@ fn quick_browse_directory(
             .and_then(|name| name.to_str())
             .unwrap_or("unknown")
             .to_string();
-        if name == ".git" {
+        if is_dir && name == ".git" {
             continue;
         }
 
-        let candidate_rule = rules.iter().find(|rule| rule.dir_name == name);
-        let entry_kind = if candidate_rule.is_some() {
+        let candidate_rule = if is_dir {
+            rules.iter().find(|rule| rule.dir_name == name)
+        } else {
+            None
+        };
+        let entry_kind = if is_file {
+            EntryKind::File
+        } else if candidate_rule.is_some() {
             EntryKind::CleanupCandidate
         } else {
             EntryKind::Directory
@@ -1073,13 +1101,22 @@ fn quick_browse_directory(
     let (parents, mut rest): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
-    rest.sort_by(|left, right| match (&left.entry_kind, &right.entry_kind) {
-        (EntryKind::CleanupCandidate, EntryKind::Directory) => std::cmp::Ordering::Less,
-        (EntryKind::Directory, EntryKind::CleanupCandidate) => std::cmp::Ordering::Greater,
-        _ => left.name.cmp(&right.name),
+    rest.sort_by(|left, right| {
+        quick_sort_rank(left)
+            .cmp(&quick_sort_rank(right))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
     });
 
     Ok(parents.into_iter().chain(rest).collect())
+}
+
+fn quick_sort_rank(entry: &BrowserEntry) -> u8 {
+    match entry.entry_kind {
+        EntryKind::Parent => 0,
+        EntryKind::CleanupCandidate => 1,
+        EntryKind::Directory | EntryKind::File => 2,
+    }
 }
 
 fn sort_entries(entries: &mut Vec<BrowserEntry>) {
@@ -1091,6 +1128,7 @@ fn sort_entries(entries: &mut Vec<BrowserEntry>) {
             .reclaimable_bytes
             .cmp(&left.reclaimable_bytes)
             .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
     });
     entries.extend(parents.into_iter().chain(rest));
 }
@@ -1428,7 +1466,13 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
             )),
             Line::raw(format!(
                 "candidate: {}",
-                entry.candidate_kind.unwrap_or_else(|| "directory".into())
+                entry.candidate_kind.unwrap_or_else(|| {
+                    if matches!(entry.entry_kind, EntryKind::File) {
+                        "file".into()
+                    } else {
+                        "directory".into()
+                    }
+                })
             )),
         ];
 
@@ -1633,8 +1677,12 @@ fn spinner_label(tick: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::apply_entry_update;
+    use super::quick_browse_directory;
     use super::sort_entries;
+    use crate::config::AppContext;
     use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn apply_entry_update_updates_matching_path_in_place() {
@@ -1693,6 +1741,19 @@ mod tests {
                 candidate_kind: None,
                 is_visible_candidate: false,
             },
+            BrowserEntry {
+                path: "/tmp/big.log".into(),
+                name: "big.log".into(),
+                size_bytes: 250,
+                reclaimable_bytes: 250,
+                size_complete: true,
+                entry_kind: EntryKind::File,
+                git_status: GitStatus::Unknown,
+                git_context: GitContext::default(),
+                risk_level: RiskLevel::Hidden,
+                candidate_kind: None,
+                is_visible_candidate: false,
+            },
             BrowserEntry::parent("/tmp".into()),
             BrowserEntry {
                 path: "/tmp/a".into(),
@@ -1712,7 +1773,29 @@ mod tests {
         sort_entries(&mut entries);
 
         assert_eq!(entries[0].entry_kind, EntryKind::Parent);
-        assert_eq!(entries[1].name, "a");
-        assert_eq!(entries[2].name, "b");
+        assert_eq!(entries[1].name, "big.log");
+        assert_eq!(entries[1].entry_kind, EntryKind::File);
+        assert_eq!(entries[2].name, "a");
+        assert_eq!(entries[3].name, "b");
+    }
+
+    #[test]
+    fn quick_browse_directory_sorts_files_dirs_and_candidates_without_cycle() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("target")).expect("create target");
+        fs::create_dir_all(root.join("aaa")).expect("create directory");
+        fs::write(root.join("mmm.log"), "artifact").expect("write file");
+
+        let entries =
+            quick_browse_directory(root, root, &AppContext::default()).expect("quick browse");
+        let names = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+        assert_eq!(names[1], ("aaa", EntryKind::Directory));
+        assert_eq!(names[2], ("mmm.log", EntryKind::File));
     }
 }

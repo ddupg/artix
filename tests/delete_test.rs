@@ -18,6 +18,29 @@ fn delete_directories_requires_explicit_confirmation_for_permanent_delete() {
 }
 
 #[test]
+fn delete_directories_permanently_deletes_file() {
+    let temp = tempdir().unwrap();
+    let doomed = temp.path().join("large.log");
+    fs::write(&doomed, "artifact").unwrap();
+
+    delete_directories(&[doomed.clone()], DeleteMode::Permanent { confirmed: true }).unwrap();
+
+    assert!(!doomed.exists());
+}
+
+#[test]
+fn delete_directories_permanently_deletes_directory() {
+    let temp = tempdir().unwrap();
+    let doomed = temp.path().join("target");
+    fs::create_dir_all(doomed.join("debug")).unwrap();
+    fs::write(doomed.join("debug/app"), "artifact").unwrap();
+
+    delete_directories(&[doomed.clone()], DeleteMode::Permanent { confirmed: true }).unwrap();
+
+    assert!(!doomed.exists());
+}
+
+#[test]
 fn delete_directories_reports_missing_path_failure() {
     let result = delete_directories(
         &[std::path::PathBuf::from("/tmp/does-not-exist")],

@@ -38,6 +38,7 @@ pub struct GitContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryKind {
     Parent,
+    File,
     Directory,
     CleanupCandidate,
 }

@@ -46,7 +46,9 @@ pub async fn browse_directory_with_context(
     let mut jobs = JoinSet::new();
     for entry in read_dir.flatten() {
         let entry_path = entry.path();
-        if !entry_path.is_dir() {
+        let is_dir = entry_path.is_dir();
+        let is_file = entry_path.is_file();
+        if !is_dir && !is_file {
             continue;
         }
         let name = entry_path
@@ -54,22 +56,34 @@ pub async fn browse_directory_with_context(
             .and_then(|name| name.to_str())
             .unwrap_or("unknown")
             .to_string();
-        if name == ".git" {
+        if is_dir && name == ".git" {
             continue;
         }
 
-        let candidate_rule = rules.iter().find(|rule| rule.dir_name == name).cloned();
+        let candidate_rule = if is_dir {
+            rules.iter().find(|rule| rule.dir_name == name).cloned()
+        } else {
+            None
+        };
         let current_context = current_context.clone();
         let ctx = ctx.clone();
 
         jobs.spawn(async move {
-            let entry_kind = if candidate_rule.is_some() {
+            let entry_kind = if is_file {
+                EntryKind::File
+            } else if candidate_rule.is_some() {
                 EntryKind::CleanupCandidate
             } else {
                 EntryKind::Directory
             };
 
-            let size_bytes = dir_size_bytes(&entry_path, &ctx).await;
+            let size_bytes = if is_file {
+                fs::metadata(&entry_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+            } else {
+                dir_size_bytes(&entry_path, &ctx).await
+            };
 
             let git_context = resolve_git_context(&entry_path).or(current_context);
             let git_status =
@@ -111,6 +125,7 @@ pub async fn browse_directory_with_context(
             .reclaimable_bytes
             .cmp(&left.reclaimable_bytes)
             .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
     });
 
     Ok(parents.into_iter().chain(rest).collect())
