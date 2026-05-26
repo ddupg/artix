@@ -17,6 +17,7 @@ fn help_command_lists_available_features() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("USAGE:"));
     assert!(stdout.contains("artix init-config"));
+    assert!(stdout.contains("-v, --version"));
     assert!(stdout.contains("--print-default-config"));
     assert!(stdout.contains("Primary path: ~/.config/artix/config.toml"));
 }
@@ -36,6 +37,36 @@ fn short_help_flag_prints_help_text() {
 }
 
 #[test]
+fn short_version_flag_prints_current_version() {
+    let output = Command::new(artix_bin_path())
+        .arg("-v")
+        .output()
+        .expect("run artix -v");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("artix {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+}
+
+#[test]
+fn long_version_flag_prints_current_version() {
+    let output = Command::new(artix_bin_path())
+        .arg("--version")
+        .output()
+        .expect("run artix --version");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("artix {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+}
+
+#[test]
 fn print_default_config_outputs_rendered_toml() {
     let output = Command::new(artix_bin_path())
         .arg("--print-default-config")
@@ -43,7 +74,10 @@ fn print_default_config_outputs_rendered_toml() {
         .expect("run artix --print-default-config");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), render_default_config_toml());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        render_default_config_toml()
+    );
     assert!(String::from_utf8(output.stderr).unwrap().is_empty());
 }
 
@@ -90,7 +124,10 @@ fn init_config_fails_when_primary_config_already_exists() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        format!("artix: config file already exists at {}\n", expected_path.display())
+        format!(
+            "artix: config file already exists at {}\n",
+            expected_path.display()
+        )
     );
 }
 

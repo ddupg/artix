@@ -14,6 +14,7 @@ enum CliCommand {
     Run { roots: Vec<PathBuf> },
     InitConfig,
     PrintDefaultConfig,
+    Version,
     Help,
 }
 
@@ -40,6 +41,10 @@ async fn main() {
         },
         CliCommand::PrintDefaultConfig => {
             print!("{}", render_default_config_toml());
+            return;
+        }
+        CliCommand::Version => {
+            println!("artix {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         CliCommand::Help => {
@@ -112,12 +117,14 @@ fn render_help_text() -> String {
         "    artix init-config\n",
         "    artix --print-default-config\n",
         "    artix help\n",
+        "    artix -v | --version\n",
         "    artix -h | --help\n\n",
         "COMMANDS:\n",
         "    help                    Show this help text\n",
         "    init-config             Write a default config file to ~/.config/artix/config.toml\n\n",
         "FLAGS:\n",
         "    -h, --help              Show this help text\n",
+        "    -v, --version           Show the current version\n",
         "        --print-default-config\n",
         "                            Print the default TOML config to stdout\n\n",
         "BEHAVIOR:\n",
@@ -158,6 +165,16 @@ fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
             return Err("--print-default-config does not accept additional arguments".to_string());
         }
         return Ok(CliCommand::PrintDefaultConfig);
+    }
+
+    if args
+        .iter()
+        .any(|arg| arg == OsStr::new("--version") || arg == OsStr::new("-v"))
+    {
+        if args.len() != 1 {
+            return Err("version does not accept additional arguments".to_string());
+        }
+        return Ok(CliCommand::Version);
     }
 
     if args
@@ -211,6 +228,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_short_version_flag() {
+        let command = parse_cli_command_from(vec![OsString::from("-v")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Version));
+    }
+
+    #[test]
+    fn parse_long_version_flag() {
+        let command = parse_cli_command_from(vec![OsString::from("--version")]).unwrap();
+
+        assert!(matches!(command, CliCommand::Version));
+    }
+
+    #[test]
     fn reject_extra_args_for_print_default_config() {
         let err = parse_cli_command_from(vec![
             OsString::from("--print-default-config"),
@@ -233,6 +264,26 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "help does not accept additional arguments");
+    }
+
+    #[test]
+    fn reject_extra_args_for_short_version_flag() {
+        let err =
+            parse_cli_command_from(vec![OsString::from("-v"), OsString::from("/tmp/workspace")])
+                .unwrap_err();
+
+        assert_eq!(err, "version does not accept additional arguments");
+    }
+
+    #[test]
+    fn reject_extra_args_for_long_version_flag() {
+        let err = parse_cli_command_from(vec![
+            OsString::from("--version"),
+            OsString::from("/tmp/workspace"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err, "version does not accept additional arguments");
     }
 
     #[test]

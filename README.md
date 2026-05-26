@@ -152,9 +152,11 @@ artix help
 ```bash
 artix --help
 artix -h
+artix --version
+artix -v
 ```
 
-帮助输出会列出当前已有的 CLI 功能，包括：扫描路径、`init-config`、`--print-default-config` 和配置文件位置。
+帮助输出会列出当前已有的 CLI 功能，包括：扫描路径、`init-config`、`--print-default-config`、`-v`/`--version` 和配置文件位置。
 
 ### 1. 构建
 
