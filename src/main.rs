@@ -58,6 +58,16 @@ async fn main() {
 }
 
 async fn run_app(roots: Vec<PathBuf>) {
+    let roots = if roots.is_empty() {
+        vec![std::env::current_dir().expect("current working directory must be readable")]
+    } else {
+        roots
+    };
+    if let Err(err) = validate_roots_exist(&roots) {
+        eprintln!("artix: {err}");
+        std::process::exit(1);
+    }
+
     let loaded = match load_config() {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -69,11 +79,6 @@ async fn run_app(roots: Vec<PathBuf>) {
         eprintln!("artix: warning: {warning}");
     }
     let ctx = AppContext::new(loaded.config);
-    let roots = if roots.is_empty() {
-        vec![std::env::current_dir().expect("current working directory must be readable")]
-    } else {
-        roots
-    };
 
     let should_run_tui = match ctx.config().ui.mode {
         UiMode::Plain => false,
@@ -103,6 +108,19 @@ async fn run_app(roots: Vec<PathBuf>) {
             row.project_name, row.reclaimable_bytes, row.candidate_count
         );
     }
+}
+
+fn validate_roots_exist(roots: &[PathBuf]) -> Result<(), String> {
+    for root in roots {
+        if !root.exists() {
+            return Err(format!(
+                "target directory does not exist: {}",
+                root.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_cli_command() -> Result<CliCommand, String> {
@@ -194,7 +212,7 @@ fn parse_cli_command_from(args: Vec<OsString>) -> Result<CliCommand, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliCommand, parse_cli_command_from};
+    use super::{CliCommand, parse_cli_command_from, validate_roots_exist};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -301,5 +319,16 @@ mod tests {
             }
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn validate_roots_rejects_missing_directory() {
+        let missing = PathBuf::from("/tmp/artix-definitely-missing-start-root");
+        let err = validate_roots_exist(std::slice::from_ref(&missing)).unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("target directory does not exist: {}", missing.display())
+        );
     }
 }

@@ -82,6 +82,28 @@ fn print_default_config_outputs_rendered_toml() {
 }
 
 #[test]
+fn missing_start_directory_fails_before_running_app() {
+    let temp = tempdir().unwrap();
+    let missing = temp.path().join("missing-workspace");
+
+    let output = Command::new(artix_bin_path())
+        .arg(&missing)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("run artix with missing start directory");
+
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "artix: target directory does not exist: {}\n",
+            missing.display()
+        )
+    );
+}
+
+#[test]
 fn init_config_writes_default_config_to_primary_path() {
     let temp = tempdir().unwrap();
     let fake_home = temp.path().join("home");
