@@ -16,15 +16,15 @@ use ratatui::widgets::{
 };
 
 use crate::classify::git::resolve_git_context;
-use crate::classify::risk::classify_risk_level;
 use crate::clean::{
     CleanPlan, CleanRunSummary, ProjectProfile, detect_project_profile, execute_clean_plan,
 };
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{delete_intent_for, execute_delete_with_config};
-use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project, RiskLevel};
+use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
 use crate::rules::default_rules;
+use crate::scan::entry as browser_entries;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -567,17 +567,18 @@ impl BrowserApp {
                             });
 
                             // Then progressively compute size/git per entry and stream updates.
-                            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                            let rules = default_rules();
+                            let Ok(seeds) = browser_entries::read_browser_entry_seeds(&dir, &rules)
+                            else {
                                 return;
                             };
-                            let rules = default_rules();
                             let current_context = resolve_git_context(&dir);
 
                             let mut jobs = JoinSet::new();
-                            for entry in read_dir.flatten() {
+                            for seed in seeds {
                                 while jobs.len() >= entry_limit {
                                     if let Some(res) = jobs.join_next().await
-                                        && let Ok(Some(entry)) = res
+                                        && let Ok(entry) = res
                                     {
                                         let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
                                             request_id,
@@ -587,88 +588,20 @@ impl BrowserApp {
                                     }
                                 }
 
-                                let entry_path = entry.path();
-                                let is_dir = entry_path.is_dir();
-                                let is_file = entry_path.is_file();
-                                if !is_dir && !is_file {
-                                    continue;
-                                }
-                                let name = entry_path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                if is_dir && name == ".git" {
-                                    continue;
-                                }
-
-                                let candidate_rule = if is_dir {
-                                    rules.iter().find(|rule| rule.dir_name == name).cloned()
-                                } else {
-                                    None
-                                };
-                                let entry_kind = if is_file {
-                                    EntryKind::File
-                                } else if candidate_rule.is_some() {
-                                    EntryKind::CleanupCandidate
-                                } else {
-                                    EntryKind::Directory
-                                };
-                                let candidate_kind =
-                                    candidate_rule.as_ref().map(|rule| rule.kind.to_string());
-                                let is_visible_candidate = candidate_rule.is_some();
-
                                 let current_context = current_context.clone();
                                 let ctx = ctx.clone();
                                 jobs.spawn(async move {
-                                    let (size_bytes, size_complete) = if is_file {
-                                        (
-                                            std::fs::metadata(&entry_path)
-                                                .map(|metadata| metadata.len())
-                                                .unwrap_or(0),
-                                            true,
-                                        )
-                                    } else {
-                                        let size = crate::scan::size::dir_size_bytes_budgeted(
-                                            &entry_path,
-                                            &ctx,
-                                        )
-                                        .await;
-                                        (size.bytes, size.complete)
-                                    };
-                                    let git_context =
-                                        resolve_git_context(&entry_path).or(current_context);
-                                    let git_status =
-                                        crate::classify::git::classify_path_git_status(
-                                            &entry_path,
-                                            git_context.as_ref(),
-                                            &ctx,
-                                        )
-                                        .await;
-
-                                    let risk_level = candidate_rule
-                                        .as_ref()
-                                        .map(|rule| classify_risk_level(rule, &git_status))
-                                        .unwrap_or(RiskLevel::Hidden);
-
-                                    Some(BrowserEntry {
-                                        path: entry_path,
-                                        name,
-                                        size_bytes,
-                                        reclaimable_bytes: size_bytes,
-                                        size_complete,
-                                        entry_kind,
-                                        git_status,
-                                        git_context: git_context.unwrap_or_default(),
-                                        risk_level,
-                                        candidate_kind,
-                                        is_visible_candidate,
-                                    })
+                                    seed.into_enriched(
+                                        current_context,
+                                        &ctx,
+                                        browser_entries::EntrySizeMode::Budgeted,
+                                    )
+                                    .await
                                 });
                             }
 
                             while let Some(res) = jobs.join_next().await {
-                                if let Ok(Some(entry)) = res {
+                                if let Ok(entry) = res {
                                     let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
                                         request_id,
                                         dir: dir.clone(),
@@ -779,10 +712,10 @@ impl BrowserApp {
                     }
 
                     if let Some(entries) = self.cache.get_mut(&dir) {
-                        apply_entry_update(entries, &entry);
-                        sort_entries(entries);
+                        browser_entries::apply_browser_entry_update(entries, &entry);
+                        browser_entries::sort_browser_entries_by_size(entries);
                     }
-                    apply_entry_update(&mut self.state.entries, &entry);
+                    browser_entries::apply_browser_entry_update(&mut self.state.entries, &entry);
                     self.resort_visible_entries_preserving_selection();
                     self.loading_paths.remove(&entry.path);
                 }
@@ -935,7 +868,7 @@ impl BrowserApp {
 
     fn resort_visible_entries_preserving_selection(&mut self) {
         let selected_path = self.state.selected_entry().map(|entry| entry.path);
-        sort_entries(&mut self.state.entries);
+        browser_entries::sort_browser_entries_by_size(&mut self.state.entries);
 
         let Some(selected_path) = selected_path else {
             self.state.clamp_selection();
@@ -1044,110 +977,18 @@ fn quick_browse_directory(
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
-    if path != root_dir
-        && let Some(parent) = path.parent()
-    {
-        entries.push(BrowserEntry::parent(parent.to_path_buf()));
+    if let Some(parent) = browser_entries::parent_entry_for(path, root_dir) {
+        entries.push(parent);
     }
 
-    let read_dir = std::fs::read_dir(path).map_err(|err| err.to_string())?;
-    for entry in read_dir.flatten() {
-        let entry_path = entry.path();
-        let is_dir = entry_path.is_dir();
-        let is_file = entry_path.is_file();
-        if !is_dir && !is_file {
-            continue;
-        }
+    entries.extend(
+        browser_entries::read_browser_entry_seeds(path, &rules)?
+            .into_iter()
+            .map(|seed| seed.into_placeholder(current_context.clone())),
+    );
+    browser_entries::sort_placeholder_entries(&mut entries);
 
-        let name = entry_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        if is_dir && name == ".git" {
-            continue;
-        }
-
-        let candidate_rule = if is_dir {
-            rules.iter().find(|rule| rule.dir_name == name)
-        } else {
-            None
-        };
-        let entry_kind = if is_file {
-            EntryKind::File
-        } else if candidate_rule.is_some() {
-            EntryKind::CleanupCandidate
-        } else {
-            EntryKind::Directory
-        };
-
-        let git_context = resolve_git_context(&entry_path).or(current_context.clone());
-
-        entries.push(BrowserEntry {
-            path: entry_path,
-            name,
-            size_bytes: 0,
-            reclaimable_bytes: 0,
-            size_complete: true,
-            entry_kind,
-            git_status: GitStatus::Unknown,
-            git_context: git_context.unwrap_or_default(),
-            risk_level: RiskLevel::Hidden,
-            candidate_kind: candidate_rule.map(|rule| rule.kind.to_string()),
-            is_visible_candidate: candidate_rule.is_some(),
-        });
-    }
-
-    let (parents, mut rest): (Vec<_>, Vec<_>) = entries
-        .into_iter()
-        .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
-    rest.sort_by(|left, right| {
-        quick_sort_rank(left)
-            .cmp(&quick_sort_rank(right))
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-
-    Ok(parents.into_iter().chain(rest).collect())
-}
-
-fn quick_sort_rank(entry: &BrowserEntry) -> u8 {
-    match entry.entry_kind {
-        EntryKind::Parent => 0,
-        EntryKind::CleanupCandidate => 1,
-        EntryKind::Directory | EntryKind::File => 2,
-    }
-}
-
-fn sort_entries(entries: &mut Vec<BrowserEntry>) {
-    let (parents, mut rest): (Vec<_>, Vec<_>) = entries
-        .drain(..)
-        .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
-    rest.sort_by(|left, right| {
-        right
-            .reclaimable_bytes
-            .cmp(&left.reclaimable_bytes)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    entries.extend(parents.into_iter().chain(rest));
-}
-
-fn apply_entry_update(entries: &mut [BrowserEntry], update: &BrowserEntry) {
-    for entry in entries {
-        if entry.path == update.path {
-            entry.size_bytes = update.size_bytes;
-            entry.reclaimable_bytes = update.reclaimable_bytes;
-            entry.size_complete = update.size_complete;
-            entry.git_status = update.git_status.clone();
-            entry.git_context = update.git_context.clone();
-            entry.risk_level = update.risk_level.clone();
-            entry.entry_kind = update.entry_kind.clone();
-            entry.candidate_kind = update.candidate_kind.clone();
-            entry.is_visible_candidate = update.is_visible_candidate;
-            break;
-        }
-    }
+    Ok(entries)
 }
 
 fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
@@ -1676,11 +1517,10 @@ fn spinner_label(tick: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_entry_update;
     use super::quick_browse_directory;
-    use super::sort_entries;
     use crate::config::AppContext;
     use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+    use crate::scan::entry as browser_entries;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1714,7 +1554,7 @@ mod tests {
             is_visible_candidate: true,
         };
 
-        apply_entry_update(&mut entries, &update);
+        browser_entries::apply_browser_entry_update(&mut entries, &update);
 
         assert_eq!(entries[0].size_bytes, 123);
         assert_eq!(entries[0].reclaimable_bytes, 123);
@@ -1770,7 +1610,7 @@ mod tests {
             },
         ];
 
-        sort_entries(&mut entries);
+        browser_entries::sort_browser_entries_by_size(&mut entries);
 
         assert_eq!(entries[0].entry_kind, EntryKind::Parent);
         assert_eq!(entries[1].name, "big.log");

@@ -1,18 +1,21 @@
 pub mod discover;
+pub(crate) mod entry;
 pub mod size;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::classify::git::{classify_git_status, classify_path_git_status, resolve_git_context};
+use crate::classify::git::{classify_git_status, resolve_git_context};
 use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
 use crate::classify::risk::classify_risk_level;
 use crate::config::AppContext;
-use crate::model::{BrowserEntry, CandidateDir, EntryKind, Project, RiskLevel};
+use crate::model::{BrowserEntry, CandidateDir, Project};
 use crate::rules::{Rule, default_rules};
 use discover::discover_candidates;
-use size::dir_size_bytes;
+use entry::{
+    EntrySizeMode, parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size,
+};
 use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,79 +38,17 @@ pub async fn browse_directory_with_context(
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
-    // Only add ".." if we're not at the root directory (the starting directory)
-    if path != root_dir
-        && let Some(parent) = path.parent()
-    {
-        entries.push(BrowserEntry::parent(parent.to_path_buf()));
+    if let Some(parent) = parent_entry_for(path, root_dir) {
+        entries.push(parent);
     }
 
-    let read_dir = fs::read_dir(path).map_err(|err| err.to_string())?;
     let mut jobs = JoinSet::new();
-    for entry in read_dir.flatten() {
-        let entry_path = entry.path();
-        let is_dir = entry_path.is_dir();
-        let is_file = entry_path.is_file();
-        if !is_dir && !is_file {
-            continue;
-        }
-        let name = entry_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        if is_dir && name == ".git" {
-            continue;
-        }
-
-        let candidate_rule = if is_dir {
-            rules.iter().find(|rule| rule.dir_name == name).cloned()
-        } else {
-            None
-        };
+    for seed in read_browser_entry_seeds(path, &rules)? {
         let current_context = current_context.clone();
         let ctx = ctx.clone();
-
         jobs.spawn(async move {
-            let entry_kind = if is_file {
-                EntryKind::File
-            } else if candidate_rule.is_some() {
-                EntryKind::CleanupCandidate
-            } else {
-                EntryKind::Directory
-            };
-
-            let size_bytes = if is_file {
-                fs::metadata(&entry_path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0)
-            } else {
-                dir_size_bytes(&entry_path, &ctx).await
-            };
-
-            let git_context = resolve_git_context(&entry_path).or(current_context);
-            let git_status =
-                classify_path_git_status(&entry_path, git_context.as_ref(), &ctx).await;
-            let risk_level = candidate_rule
-                .as_ref()
-                .map(|rule| classify_risk_level(rule, &git_status))
-                .unwrap_or(RiskLevel::Hidden);
-
-            let is_visible_candidate = matches!(entry_kind, EntryKind::CleanupCandidate);
-
-            BrowserEntry {
-                path: entry_path,
-                name,
-                size_bytes,
-                reclaimable_bytes: size_bytes,
-                size_complete: true,
-                entry_kind,
-                git_status,
-                git_context: git_context.unwrap_or_default(),
-                risk_level,
-                candidate_kind: candidate_rule.map(|rule| rule.kind.to_string()),
-                is_visible_candidate,
-            }
+            seed.into_enriched(current_context, &ctx, EntrySizeMode::Full)
+                .await
         });
     }
 
@@ -117,18 +58,9 @@ pub async fn browse_directory_with_context(
         }
     }
 
-    let (parents, mut rest): (Vec<_>, Vec<_>) = entries
-        .into_iter()
-        .partition(|entry| matches!(entry.entry_kind, EntryKind::Parent));
-    rest.sort_by(|left, right| {
-        right
-            .reclaimable_bytes
-            .cmp(&left.reclaimable_bytes)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    sort_browser_entries_by_size(&mut entries);
 
-    Ok(parents.into_iter().chain(rest).collect())
+    Ok(entries)
 }
 
 pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
