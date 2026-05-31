@@ -3,31 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+pub use crate::project::ProjectKind;
+use crate::project::detect_project_kinds;
 use serde::Deserialize;
 use serde_json::Value;
 
 const OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ProjectKind {
-    Rust,
-    Maven,
-    Gradle,
-    Node,
-    Python,
-}
-
-impl ProjectKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Rust => "Rust",
-            Self::Maven => "Maven",
-            Self::Gradle => "Gradle",
-            Self::Node => "Node",
-            Self::Python => "Python",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageSummary {
@@ -252,26 +233,6 @@ fn command<const N: usize>(
         args: args.into_iter().map(str::to_string).collect(),
         cwd: cwd.to_path_buf(),
     }
-}
-
-fn detect_project_kinds(path: &Path) -> Vec<ProjectKind> {
-    let mut kinds = Vec::new();
-    if path.join("Cargo.toml").is_file() {
-        kinds.push(ProjectKind::Rust);
-    }
-    if path.join("pom.xml").is_file() {
-        kinds.push(ProjectKind::Maven);
-    }
-    if path.join("build.gradle").is_file() || path.join("build.gradle.kts").is_file() {
-        kinds.push(ProjectKind::Gradle);
-    }
-    if path.join("package.json").is_file() {
-        kinds.push(ProjectKind::Node);
-    }
-    if path.join("pyproject.toml").is_file() {
-        kinds.push(ProjectKind::Python);
-    }
-    kinds
 }
 
 fn detect_languages(path: &Path) -> Result<Vec<LanguageSummary>, String> {

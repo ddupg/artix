@@ -11,6 +11,7 @@ use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
 use crate::classify::risk::classify_risk_level;
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, Project};
+use crate::project::{is_project_marker_file_name, project_language_hint};
 use crate::rules::{Rule, default_rules};
 use discover::discover_candidates;
 use entry::{
@@ -180,7 +181,7 @@ fn collect_ownership_markers_from_path(path: &Path, markers: &mut Vec<PathBuf>) 
                 continue;
             };
 
-            if matches!(file_name, "Cargo.toml" | "package.json" | "pyproject.toml") {
+            if is_project_marker_file_name(file_name) {
                 markers.push(entry_path);
             }
 
@@ -197,10 +198,14 @@ fn summarize_projects(candidates: &[CandidateDir], rules: &[Rule]) -> Vec<Projec
     let mut projects = BTreeMap::<PathBuf, Project>::new();
 
     for candidate in candidates {
-        let language_hint = rules
-            .iter()
-            .find(|rule| rule.id == candidate.rule_id)
-            .map(|rule| rule.language_hint.to_string());
+        let language_hint = project_language_hint(&candidate.project_root)
+            .map(str::to_string)
+            .or_else(|| {
+                rules
+                    .iter()
+                    .find(|rule| rule.id == candidate.rule_id)
+                    .map(|rule| rule.language_hint.to_string())
+            });
         let project = projects
             .entry(candidate.project_root.clone())
             .or_insert_with(|| Project {
