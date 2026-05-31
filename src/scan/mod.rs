@@ -11,6 +11,7 @@ use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
 use crate::classify::risk::classify_risk_level;
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, Project};
+use crate::project::is_project_marker_file_name;
 use crate::rules::{Rule, default_rules};
 use discover::discover_candidates;
 use entry::{
@@ -180,7 +181,7 @@ fn collect_ownership_markers_from_path(path: &Path, markers: &mut Vec<PathBuf>) 
                 continue;
             };
 
-            if matches!(file_name, "Cargo.toml" | "package.json" | "pyproject.toml") {
+            if is_project_marker_file_name(file_name) {
                 markers.push(entry_path);
             }
 

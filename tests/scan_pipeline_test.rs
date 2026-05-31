@@ -186,6 +186,38 @@ async fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
     fs::remove_dir_all(&workspace).expect("cleanup temp project");
 }
 
+#[tokio::test]
+async fn scan_workspace_assigns_nested_java_target_to_nearest_java_project() {
+    let workspace = make_temp_project();
+    let app = workspace.join("services/batch");
+
+    fs::create_dir_all(&app).expect("create nested java app");
+    fs::write(app.join("pom.xml"), "<project />\n").expect("write pom.xml");
+
+    let target_file = app.join("target/classes/App.class");
+    fs::create_dir_all(target_file.parent().expect("target classes dir"))
+        .expect("create target/classes");
+    fs::write(&target_file, "bytecode").expect("write class file");
+
+    let report = scan_workspace(std::slice::from_ref(&workspace)).await;
+
+    let candidate = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path == app.join("target"))
+        .expect("target candidate");
+    let project_summary = report
+        .projects
+        .iter()
+        .find(|summary| summary.root == app)
+        .expect("nested java project summary");
+
+    assert_eq!(candidate.project_root, app);
+    assert_eq!(project_summary.candidate_count, 1);
+
+    fs::remove_dir_all(&workspace).expect("cleanup temp project");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn scan_workspace_size_does_not_follow_symlink_cycles() {

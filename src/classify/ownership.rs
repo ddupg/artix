@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use crate::project::project_root_from_marker;
+
 pub fn infer_project_roots(markers: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     for marker in markers {
-        let root = marker
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| marker.clone());
+        let root = project_root_from_marker(marker);
 
         if !roots.iter().any(|existing| existing == &root) {
             roots.push(root);
