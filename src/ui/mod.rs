@@ -1,3 +1,4 @@
+mod ops;
 mod theme;
 
 use std::collections::HashMap;
@@ -461,13 +462,10 @@ struct BrowserApp {
     cache: HashMap<PathBuf, Vec<BrowserEntry>>,
     profile_cache: HashMap<PathBuf, Option<ProjectProfile>>,
     icon_mode: theme::IconMode,
+    ops: ops::OperationTracker,
 
     bg_tx: mpsc::UnboundedSender<BgRequest>,
     bg_rx: mpsc::UnboundedReceiver<BgResponse>,
-    next_request_id: u64,
-    pending_load_id: Option<u64>,
-    pending_delete_id: Option<u64>,
-    pending_clean_id: Option<u64>,
 
     loading_paths: HashSet<PathBuf>,
     spinner_tick: usize,
@@ -656,13 +654,10 @@ impl BrowserApp {
             cache: HashMap::new(),
             profile_cache: HashMap::new(),
             icon_mode,
+            ops: ops::OperationTracker::new(),
 
             bg_tx,
             bg_rx,
-            next_request_id: 1,
-            pending_load_id: None,
-            pending_delete_id: None,
-            pending_clean_id: None,
 
             loading_paths: HashSet::new(),
             spinner_tick: 0,
@@ -680,7 +675,7 @@ impl BrowserApp {
                     dir,
                     result,
                 } => {
-                    if self.pending_load_id != Some(request_id) {
+                    if !self.ops.is_pending_load(request_id) {
                         continue;
                     }
 
@@ -704,7 +699,7 @@ impl BrowserApp {
                     entry,
                 } => {
                     let entry = *entry;
-                    if self.pending_load_id != Some(request_id) {
+                    if !self.ops.is_pending_load(request_id) {
                         continue;
                     }
                     if self.state.current_dir() != dir.as_path() {
@@ -724,7 +719,7 @@ impl BrowserApp {
                     dir,
                     result,
                 } => {
-                    if self.pending_load_id != Some(request_id) {
+                    if !self.ops.is_pending_load(request_id) {
                         continue;
                     }
                     let profile = result.unwrap_or(None);
@@ -738,14 +733,13 @@ impl BrowserApp {
                     entry_path,
                     result,
                 } => {
-                    if self.pending_delete_id != Some(request_id) {
+                    if !self.ops.finish_delete(request_id) {
                         continue;
                     }
-                    self.pending_delete_id = None;
 
                     match result {
                         Ok(_message) => {
-                            self.invalidate_related_paths(&entry_path);
+                            ops::invalidate_related_paths(&mut self.cache, &entry_path);
                             let current = self.state.current_dir().to_path_buf();
                             self.state.clear_delete_state();
                             self.load_directory(current);
@@ -758,11 +752,10 @@ impl BrowserApp {
                     project_root,
                     summary,
                 } => {
-                    if self.pending_clean_id != Some(request_id) {
+                    if !self.ops.finish_clean(request_id) {
                         continue;
                     }
-                    self.pending_clean_id = None;
-                    self.invalidate_related_paths(&project_root);
+                    ops::invalidate_related_paths(&mut self.cache, &project_root);
                     self.profile_cache.remove(&project_root);
                     self.state.finish_clean(summary, Instant::now());
                     let current = self.state.current_dir().to_path_buf();
@@ -858,9 +851,7 @@ impl BrowserApp {
             );
         }
 
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        self.pending_load_id = Some(request_id);
+        let request_id = self.ops.start_load();
         let _ = self
             .bg_tx
             .send(BgRequest::LoadDirectory { request_id, dir });
@@ -901,9 +892,7 @@ impl BrowserApp {
                     _ => return Ok(()),
                 };
 
-                let request_id = self.next_request_id;
-                self.next_request_id = self.next_request_id.saturating_add(1);
-                self.pending_delete_id = Some(request_id);
+                let request_id = self.ops.start_delete();
                 let _ = self.bg_tx.send(BgRequest::Delete {
                     request_id,
                     entry: Box::new(entry),
@@ -920,9 +909,7 @@ impl BrowserApp {
             CleanState::Confirming { plan } => {
                 let plan = plan.clone();
                 self.state.set_clean_running();
-                let request_id = self.next_request_id;
-                self.next_request_id = self.next_request_id.saturating_add(1);
-                self.pending_clean_id = Some(request_id);
+                let request_id = self.ops.start_clean();
                 let _ = self.bg_tx.send(BgRequest::Clean { request_id, plan });
                 Ok(())
             }
@@ -950,21 +937,13 @@ impl BrowserApp {
 
         self.state.set_delete_running();
 
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        self.pending_delete_id = Some(request_id);
+        let request_id = self.ops.start_delete();
         let _ = self.bg_tx.send(BgRequest::Delete {
             request_id,
             entry: Box::new(entry),
             mode,
         });
         Ok(())
-    }
-
-    fn invalidate_related_paths(&mut self, path: &Path) {
-        self.cache.retain(|cached_dir, _| {
-            !(path.starts_with(cached_dir.as_path()) || cached_dir.starts_with(path))
-        });
     }
 }
 
