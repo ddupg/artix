@@ -213,6 +213,7 @@ async fn scan_workspace_assigns_nested_java_target_to_nearest_java_project() {
         .expect("nested java project summary");
 
     assert_eq!(candidate.project_root, app);
+    assert_eq!(project_summary.language_hint.as_deref(), Some("java"));
     assert_eq!(project_summary.candidate_count, 1);
 
     fs::remove_dir_all(&workspace).expect("cleanup temp project");

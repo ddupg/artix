@@ -19,6 +19,15 @@ impl ProjectKind {
             Self::Python => "Python",
         }
     }
+
+    pub fn language_hint(&self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Maven | Self::Gradle => "java",
+            Self::Node => "node",
+            Self::Python => "python",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +75,12 @@ pub fn detect_project_kinds(path: &Path) -> Vec<ProjectKind> {
     kinds
 }
 
+pub fn project_language_hint(path: &Path) -> Option<&'static str> {
+    detect_project_kinds(path)
+        .first()
+        .map(ProjectKind::language_hint)
+}
+
 pub fn is_project_marker_file_name(file_name: &str) -> bool {
     PROJECT_MARKERS
         .iter()
@@ -85,7 +100,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ProjectKind, detect_project_kinds, is_project_marker_file_name};
+    use super::{
+        ProjectKind, detect_project_kinds, is_project_marker_file_name, project_language_hint,
+    };
 
     #[test]
     fn marker_registry_covers_scan_and_clean_project_kinds() {
@@ -104,5 +121,13 @@ mod tests {
         fs::write(dir.path().join("build.gradle.kts"), "plugins {}\n").expect("write gradle kts");
 
         assert_eq!(detect_project_kinds(dir.path()), vec![ProjectKind::Gradle]);
+    }
+
+    #[test]
+    fn project_language_hint_uses_project_identity() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("pom.xml"), "<project />\n").expect("write pom");
+
+        assert_eq!(project_language_hint(dir.path()), Some("java"));
     }
 }
