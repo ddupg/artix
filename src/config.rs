@@ -380,7 +380,10 @@ fn candidate_config_paths_for(home_dir: Option<PathBuf>) -> Vec<(PathBuf, Config
         push_config_path(
             &mut paths,
             &mut seen,
-            home_dir.join(".config").join("artix").join(CONFIG_FILE_NAME),
+            home_dir
+                .join(".config")
+                .join("artix")
+                .join(CONFIG_FILE_NAME),
             ConfigPathKind::Primary,
         );
         push_config_path(
@@ -422,8 +425,12 @@ fn init_default_config_file_at(
         })?;
     }
 
-    fs::write(&target_path, render_default_config_toml())
-        .map_err(|err| format!("failed to write config file {}: {err}", target_path.display()))?;
+    fs::write(&target_path, render_default_config_toml()).map_err(|err| {
+        format!(
+            "failed to write config file {}: {err}",
+            target_path.display()
+        )
+    })?;
 
     Ok(target_path)
 }
