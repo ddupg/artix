@@ -109,10 +109,6 @@ fs_concurrency = 8
 git_concurrency = 4
 tui_entry_concurrency = 8
 
-[scan.tui_size_budget]
-max_entries = 1000000
-timeout_ms = 3000
-
 [delete]
 trash_backend = "auto"  # auto | builtin
 ```
@@ -131,10 +127,6 @@ trash_backend = "auto"  # auto | builtin
   - Git 子进程并发度；默认 `available_parallelism`，并 clamp 到 `[2, 8]`
 - `[performance].tui_entry_concurrency`
   - TUI 目录项后台补全并发度；默认 `available_parallelism * 2`，并 clamp 到 `[4, 32]`
-- `[scan.tui_size_budget].max_entries`
-  - TUI 中单目录 size 预算允许扫描的最大 entry 数；设为 `0` 表示不限制
-- `[scan.tui_size_budget].timeout_ms`
-  - TUI 中单目录 size 预算超时；设为 `0` 表示不超时
 - `[delete].trash_backend`
   - `auto`：优先系统 trash，macOS 上失败时回退到内置 `~/.Trash`
   - `builtin`：直接走内置 `~/.Trash`

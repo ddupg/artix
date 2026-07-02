@@ -9,8 +9,6 @@ use tokio::sync::Semaphore;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 const CONFIG_VERSION: u32 = 1;
-const DEFAULT_TUI_SIZE_MAX_ENTRIES: u64 = 1_000_000;
-const DEFAULT_TUI_SIZE_TIMEOUT_MS: u64 = 3_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -18,7 +16,6 @@ struct RawConfigFile {
     version: Option<u32>,
     ui: RawUiConfig,
     performance: RawPerformanceConfig,
-    scan: RawScanConfig,
     delete: RawDeleteConfig,
 }
 
@@ -35,19 +32,6 @@ struct RawPerformanceConfig {
     fs_concurrency: Option<usize>,
     git_concurrency: Option<usize>,
     tui_entry_concurrency: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawScanConfig {
-    tui_size_budget: RawSizeBudgetConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawSizeBudgetConfig {
-    max_entries: Option<u64>,
-    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -87,12 +71,6 @@ pub struct PerformanceConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SizeBudgetConfig {
-    pub max_entries: Option<u64>,
-    pub timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeTraversalOptions {
     pub follow_symlinks: bool,
     pub dedup_dir_inodes: bool,
@@ -100,7 +78,6 @@ pub struct SizeTraversalOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanConfig {
-    pub tui_size_budget: SizeBudgetConfig,
     pub size_traversal: SizeTraversalOptions,
 }
 
@@ -152,10 +129,6 @@ impl Default for Config {
                 tui_entry_concurrency: default_tui_entry_concurrency(),
             },
             scan: ScanConfig {
-                tui_size_budget: SizeBudgetConfig {
-                    max_entries: Some(DEFAULT_TUI_SIZE_MAX_ENTRIES),
-                    timeout_ms: Some(DEFAULT_TUI_SIZE_TIMEOUT_MS),
-                },
                 size_traversal: SizeTraversalOptions {
                     follow_symlinks: false,
                     dedup_dir_inodes: true,
@@ -210,17 +183,6 @@ impl Config {
             config.performance.tui_entry_concurrency,
         )?;
 
-        config.scan.tui_size_budget.max_entries = match raw.scan.tui_size_budget.max_entries {
-            Some(0) => None,
-            Some(value) => Some(value),
-            None => config.scan.tui_size_budget.max_entries,
-        };
-        config.scan.tui_size_budget.timeout_ms = match raw.scan.tui_size_budget.timeout_ms {
-            Some(0) => None,
-            Some(value) => Some(value),
-            None => config.scan.tui_size_budget.timeout_ms,
-        };
-
         config.delete.trash_backend = raw
             .delete
             .trash_backend
@@ -240,15 +202,13 @@ pub fn render_default_config_toml() -> String {
     let config = Config::default();
 
     format!(
-        "version = {}\n\n[ui]\nmode = \"{}\"   # auto | plain | tui\nicons = {}\n\n[performance]\nfs_concurrency = {}\ngit_concurrency = {}\ntui_entry_concurrency = {}\n\n[scan.tui_size_budget]\nmax_entries = {}\ntimeout_ms = {}\n\n[delete]\ntrash_backend = \"{}\"  # auto | builtin\n",
+        "version = {}\n\n[ui]\nmode = \"{}\"   # auto | plain | tui\nicons = {}\n\n[performance]\nfs_concurrency = {}\ngit_concurrency = {}\ntui_entry_concurrency = {}\n\n[delete]\ntrash_backend = \"{}\"  # auto | builtin\n",
         config.version,
         config.ui.mode.as_toml_value(),
         config.ui.icons,
         config.performance.fs_concurrency,
         config.performance.git_concurrency,
         config.performance.tui_entry_concurrency,
-        config.scan.tui_size_budget.max_entries.unwrap_or(0),
-        config.scan.tui_size_budget.timeout_ms.unwrap_or(0),
         config.delete.trash_backend.as_toml_value(),
     )
 }
@@ -464,10 +424,6 @@ fs_concurrency = 9
 git_concurrency = 3
 tui_entry_concurrency = 7
 
-[scan.tui_size_budget]
-max_entries = 10
-timeout_ms = 50
-
 [delete]
 trash_backend = "builtin"
 "#,
@@ -479,9 +435,21 @@ trash_backend = "builtin"
         assert_eq!(config.performance.fs_concurrency, 9);
         assert_eq!(config.performance.git_concurrency, 3);
         assert_eq!(config.performance.tui_entry_concurrency, 7);
-        assert_eq!(config.scan.tui_size_budget.max_entries, Some(10));
-        assert_eq!(config.scan.tui_size_budget.timeout_ms, Some(50));
         assert_eq!(config.delete.trash_backend, TrashBackend::Builtin);
+    }
+
+    #[test]
+    fn config_from_toml_rejects_removed_tui_size_budget() {
+        let err = Config::from_toml_str(
+            r#"
+[scan.tui_size_budget]
+max_entries = 10
+timeout_ms = 50
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("unknown field"));
     }
 
     #[test]

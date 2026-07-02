@@ -49,10 +49,6 @@ pub struct BrowserEntry {
     pub name: String,
     pub size_bytes: u64,
     pub reclaimable_bytes: u64,
-    /// Whether `size_bytes` / `reclaimable_bytes` is complete.
-    ///
-    /// Large directories may return partial sizes due to budget/timeout guards.
-    pub size_complete: bool,
     pub entry_kind: EntryKind,
     pub git_status: GitStatus,
     pub git_context: GitContext,
@@ -68,7 +64,6 @@ impl BrowserEntry {
             name: "..".into(),
             size_bytes: 0,
             reclaimable_bytes: 0,
-            size_complete: true,
             entry_kind: EntryKind::Parent,
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),

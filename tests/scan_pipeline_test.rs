@@ -350,8 +350,12 @@ fn cli_without_args_scans_current_directory() {
     fs::create_dir_all(target_file.parent().expect("target dir")).expect("create target dir");
     fs::write(&target_file, "binary").expect("write target/debug/app");
 
+    let fake_home = project.join("home");
+    fs::create_dir_all(&fake_home).expect("create fake home");
+
     let output = Command::new(env!("CARGO_BIN_EXE_artix"))
         .current_dir(&project)
+        .env("HOME", &fake_home)
         .output()
         .expect("run artix without args");
 

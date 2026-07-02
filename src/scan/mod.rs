@@ -14,9 +14,7 @@ use crate::model::{BrowserEntry, CandidateDir, Project};
 use crate::project::{is_project_marker_file_name, project_language_hint};
 use crate::rules::{Rule, default_rules};
 use discover::discover_candidates;
-use entry::{
-    EntrySizeMode, parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size,
-};
+use entry::{parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size};
 use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,10 +45,7 @@ pub async fn browse_directory_with_context(
     for seed in read_browser_entry_seeds(path, &rules)? {
         let current_context = current_context.clone();
         let ctx = ctx.clone();
-        jobs.spawn(async move {
-            seed.into_enriched(current_context, &ctx, EntrySizeMode::Full)
-                .await
-        });
+        jobs.spawn(async move { seed.into_enriched(current_context, &ctx).await });
     }
 
     while let Some(res) = jobs.join_next().await {

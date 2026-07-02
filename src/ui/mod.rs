@@ -589,12 +589,7 @@ impl BrowserApp {
                                 let current_context = current_context.clone();
                                 let ctx = ctx.clone();
                                 jobs.spawn(async move {
-                                    seed.into_enriched(
-                                        current_context,
-                                        &ctx,
-                                        browser_entries::EntrySizeMode::Budgeted,
-                                    )
-                                    .await
+                                    seed.into_enriched(current_context, &ctx).await
                                 });
                             }
 
@@ -1161,11 +1156,7 @@ fn list_item_for_entry(
         if loading_paths.contains(&entry.path) && !matches!(entry.entry_kind, EntryKind::Parent) {
             spinner_label(spinner_tick).to_string()
         } else {
-            let mut label = human_bytes(entry.reclaimable_bytes);
-            if !entry.size_complete && !matches!(entry.entry_kind, EntryKind::Parent) {
-                label.push('~');
-            }
-            label
+            human_bytes(entry.reclaimable_bytes)
         };
 
     let mut spans = vec![Span::styled(
@@ -1247,16 +1238,8 @@ fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize)
 
 fn render_context(state: &AppState) -> Paragraph<'static> {
     let lines = if let Some(entry) = state.selected_entry() {
-        let size_label = if entry.size_complete {
-            human_bytes(entry.size_bytes)
-        } else {
-            format!("{} (partial)", human_bytes(entry.size_bytes))
-        };
-        let reclaimable_label = if entry.size_complete {
-            human_bytes(entry.reclaimable_bytes)
-        } else {
-            format!("{} (partial)", human_bytes(entry.reclaimable_bytes))
-        };
+        let size_label = human_bytes(entry.size_bytes);
+        let reclaimable_label = human_bytes(entry.reclaimable_bytes);
         let mut lines = vec![
             Line::raw(format!("path: {}", entry.path.display())),
             Line::raw(format!("size: {}", size_label)),
@@ -1510,7 +1493,6 @@ mod tests {
             name: "a".into(),
             size_bytes: 0,
             reclaimable_bytes: 0,
-            size_complete: true,
             entry_kind: EntryKind::Directory,
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
@@ -1524,7 +1506,6 @@ mod tests {
             name: "a".into(),
             size_bytes: 123,
             reclaimable_bytes: 123,
-            size_complete: true,
             entry_kind: EntryKind::CleanupCandidate,
             git_status: GitStatus::Ignored,
             git_context: GitContext::default(),
@@ -1552,7 +1533,6 @@ mod tests {
                 name: "b".into(),
                 size_bytes: 10,
                 reclaimable_bytes: 10,
-                size_complete: true,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -1565,7 +1545,6 @@ mod tests {
                 name: "big.log".into(),
                 size_bytes: 250,
                 reclaimable_bytes: 250,
-                size_complete: true,
                 entry_kind: EntryKind::File,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -1579,7 +1558,6 @@ mod tests {
                 name: "a".into(),
                 size_bytes: 99,
                 reclaimable_bytes: 99,
-                size_complete: true,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),

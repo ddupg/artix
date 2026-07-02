@@ -7,13 +7,7 @@ use crate::config::AppContext;
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
 use crate::rules::Rule;
 
-use super::size::{dir_size_bytes, dir_size_bytes_budgeted};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntrySizeMode {
-    Full,
-    Budgeted,
-}
+use super::size::dir_size_bytes;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserEntrySeed {
@@ -26,44 +20,29 @@ pub(crate) struct BrowserEntrySeed {
 impl BrowserEntrySeed {
     pub(crate) fn into_placeholder(self, current_context: Option<GitContext>) -> BrowserEntry {
         let git_context = self.git_context(current_context.as_ref());
-        self.into_browser_entry(0, true, GitStatus::Unknown, git_context.unwrap_or_default())
+        self.into_browser_entry(0, GitStatus::Unknown, git_context.unwrap_or_default())
     }
 
     pub(crate) async fn into_enriched(
         self,
         current_context: Option<GitContext>,
         ctx: &AppContext,
-        size_mode: EntrySizeMode,
     ) -> BrowserEntry {
-        let (size_bytes, size_complete) = self.size(ctx, size_mode).await;
+        let size_bytes = self.size(ctx).await;
         let git_context = self.git_context(current_context.as_ref());
         let git_status = classify_path_git_status(&self.path, git_context.as_ref(), ctx).await;
 
-        self.into_browser_entry(
-            size_bytes,
-            size_complete,
-            git_status,
-            git_context.unwrap_or_default(),
-        )
+        self.into_browser_entry(size_bytes, git_status, git_context.unwrap_or_default())
     }
 
-    async fn size(&self, ctx: &AppContext, size_mode: EntrySizeMode) -> (u64, bool) {
+    async fn size(&self, ctx: &AppContext) -> u64 {
         if self.is_file {
-            return (
-                fs::metadata(&self.path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0),
-                true,
-            );
+            return fs::metadata(&self.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
         }
 
-        match size_mode {
-            EntrySizeMode::Full => (dir_size_bytes(&self.path, ctx).await, true),
-            EntrySizeMode::Budgeted => {
-                let size = dir_size_bytes_budgeted(&self.path, ctx).await;
-                (size.bytes, size.complete)
-            }
-        }
+        dir_size_bytes(&self.path, ctx).await
     }
 
     fn git_context(&self, current_context: Option<&GitContext>) -> Option<GitContext> {
@@ -73,7 +52,6 @@ impl BrowserEntrySeed {
     fn into_browser_entry(
         self,
         size_bytes: u64,
-        size_complete: bool,
         git_status: GitStatus,
         git_context: GitContext,
     ) -> BrowserEntry {
@@ -91,7 +69,6 @@ impl BrowserEntrySeed {
             name: self.name,
             size_bytes,
             reclaimable_bytes: size_bytes,
-            size_complete,
             entry_kind,
             git_status,
             git_context,
@@ -194,7 +171,6 @@ pub(crate) fn apply_browser_entry_update(entries: &mut [BrowserEntry], update: &
         if entry.path == update.path {
             entry.size_bytes = update.size_bytes;
             entry.reclaimable_bytes = update.reclaimable_bytes;
-            entry.size_complete = update.size_complete;
             entry.git_status = update.git_status.clone();
             entry.git_context = update.git_context.clone();
             entry.risk_level = update.risk_level.clone();
