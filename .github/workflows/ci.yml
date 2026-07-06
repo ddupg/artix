@@ -17,7 +17,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@1.96.0
+    - name: Report dependency freshness
+      run: cargo update --dry-run --verbose
+    - name: Report duplicate dependencies
+      run: cargo tree --duplicates
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --locked --verbose
