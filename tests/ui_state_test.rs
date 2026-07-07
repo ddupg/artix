@@ -1,9 +1,6 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
-use artix::clean::{
-    CleanCommand, CleanCommandResult, CleanPlan, CleanRunSummary, ProjectKind, ProjectProfile,
-};
+use artix::clean::{CleanCommand, CleanPlan, ProjectKind, ProjectProfile};
 use artix::delete::DeleteMode;
 use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
 use artix::ui::{AppState, CleanState, DeleteIntent, DeleteState, DeleteTargetKind, FilterMode};
@@ -244,16 +241,12 @@ fn clean_shortcut_is_disabled_when_profile_has_no_commands() {
 }
 
 #[test]
-fn clean_result_auto_dismisses_after_three_seconds() {
+fn clean_result_dismisses_immediately() {
     let cwd = PathBuf::from("/workspace/repo");
-    let mut app = AppState::new(cwd.clone(), vec![]);
-    let now = Instant::now();
+    let mut app = AppState::new(cwd, vec![]);
 
-    app.finish_clean(clean_summary(cwd), now);
-    app.dismiss_expired_clean_result(now + Duration::from_secs(2));
-    assert!(matches!(app.clean_state(), CleanState::Finished { .. }));
+    app.finish_clean();
 
-    app.dismiss_expired_clean_result(now + Duration::from_secs(3));
     assert_eq!(app.clean_state(), &CleanState::Idle);
 }
 
@@ -323,24 +316,5 @@ fn profile_with_command(root: PathBuf) -> ProjectProfile {
                 cwd: root,
             }],
         },
-    }
-}
-
-fn clean_summary(root: PathBuf) -> CleanRunSummary {
-    let command = CleanCommand {
-        kind: ProjectKind::Rust,
-        program: "cargo".to_string(),
-        args: vec!["clean".to_string()],
-        cwd: root.clone(),
-    };
-    CleanRunSummary {
-        project_root: root,
-        results: vec![CleanCommandResult {
-            command,
-            success: true,
-            status_code: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-        }],
     }
 }
