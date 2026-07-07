@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -17,9 +17,7 @@ use ratatui::widgets::{
 };
 
 use crate::classify::git::resolve_git_context;
-use crate::clean::{
-    CleanPlan, CleanRunSummary, ProjectProfile, detect_project_profile, execute_clean_plan,
-};
+use crate::clean::{CleanPlan, ProjectProfile, detect_project_profile, execute_clean_plan};
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{delete_intent_for, execute_delete_with_config};
@@ -32,21 +30,11 @@ use tokio::task::JoinSet;
 
 pub use crate::delete_flow::{DeleteIntent, DeleteState, DeleteTargetKind};
 
-const CLEAN_FINISHED_DISMISS_AFTER: Duration = Duration::from_secs(3);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanState {
     Idle,
-    Confirming {
-        plan: CleanPlan,
-    },
-    Running {
-        plan: CleanPlan,
-    },
-    Finished {
-        summary: CleanRunSummary,
-        dismiss_at: Instant,
-    },
+    Confirming { plan: CleanPlan },
+    Running { plan: CleanPlan },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,8 +138,7 @@ impl AppState {
 
     pub fn set_current_project_profile(&mut self, profile: Option<ProjectProfile>) {
         self.current_project_profile = profile;
-        if !self.can_clean_current_dir() && !matches!(self.clean_state, CleanState::Finished { .. })
-        {
+        if !self.can_clean_current_dir() {
             self.clean_state = CleanState::Idle;
         }
     }
@@ -249,10 +236,7 @@ impl AppState {
 
     pub fn request_clean_current_dir(&mut self) {
         if !matches!(self.delete_state, DeleteState::Idle)
-            || !matches!(
-                self.clean_state,
-                CleanState::Idle | CleanState::Finished { .. }
-            )
+            || !matches!(self.clean_state, CleanState::Idle)
         {
             return;
         }
@@ -273,19 +257,8 @@ impl AppState {
         }
     }
 
-    pub fn finish_clean(&mut self, summary: CleanRunSummary, now: Instant) {
-        self.clean_state = CleanState::Finished {
-            summary,
-            dismiss_at: now + CLEAN_FINISHED_DISMISS_AFTER,
-        };
-    }
-
-    pub fn dismiss_expired_clean_result(&mut self, now: Instant) {
-        if let CleanState::Finished { dismiss_at, .. } = &self.clean_state
-            && now >= *dismiss_at
-        {
-            self.clean_state = CleanState::Idle;
-        }
+    pub fn finish_clean(&mut self) {
+        self.clean_state = CleanState::Idle;
     }
 
     pub fn set_delete_mode(&mut self, mode: DeleteMode) {
@@ -410,7 +383,6 @@ fn run_app(
 
     loop {
         app.pump_background();
-        app.state.dismiss_expired_clean_result(Instant::now());
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &app))?;
 
@@ -513,7 +485,6 @@ enum BgResponse {
     CleanFinished {
         request_id: u64,
         project_root: PathBuf,
-        summary: CleanRunSummary,
     },
 }
 
@@ -630,11 +601,10 @@ impl BrowserApp {
                         let bg_resp_tx = bg_resp_tx.clone();
                         tokio::spawn(async move {
                             let project_root = plan.project_root.clone();
-                            let summary = execute_clean_plan(plan).await;
+                            let _summary = execute_clean_plan(plan).await;
                             let _ = bg_resp_tx.send(BgResponse::CleanFinished {
                                 request_id,
                                 project_root,
-                                summary,
                             });
                         });
                     }
@@ -745,14 +715,13 @@ impl BrowserApp {
                 BgResponse::CleanFinished {
                     request_id,
                     project_root,
-                    summary,
                 } => {
                     if !self.ops.finish_clean(request_id) {
                         continue;
                     }
                     ops::invalidate_related_paths(&mut self.cache, &project_root);
                     self.profile_cache.remove(&project_root);
-                    self.state.finish_clean(summary, Instant::now());
+                    self.state.finish_clean();
                     let current = self.state.current_dir().to_path_buf();
                     let selected_path = self.state.selected_entry().map(|entry| entry.path);
                     self.load_directory_preserving_selection(current, selected_path);
@@ -1330,7 +1299,6 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
         (DeleteState::Failed { .. }, _) => "esc dismiss",
         (DeleteState::Idle, CleanState::Confirming { .. }) => "y run clean | esc cancel",
         (DeleteState::Idle, CleanState::Running { .. }) => "running clean...",
-        (DeleteState::Idle, CleanState::Finished { .. }) => "clean result closes automatically",
     };
 
     let block = Block::default().borders(Borders::ALL).title("Keys");
@@ -1405,31 +1373,12 @@ fn render_clean_dialog(state: &CleanState) -> Paragraph<'static> {
                 .unwrap_or_else(|| "clean".to_string());
             vec![Line::raw(format!("Running {first} ..."))]
         }
-        CleanState::Finished {
-            summary,
-            dismiss_at,
-        } => vec![
-            Line::raw(summary.message()),
-            Line::raw(format!(
-                "Closing in {}s",
-                clean_result_remaining_secs(*dismiss_at, Instant::now())
-            )),
-        ],
         CleanState::Idle => vec![Line::raw("")],
     };
 
     Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("Clean"))
         .wrap(Wrap { trim: true })
-}
-
-fn clean_result_remaining_secs(dismiss_at: Instant, now: Instant) -> u64 {
-    let remaining = dismiss_at.saturating_duration_since(now);
-    if remaining.is_zero() {
-        0
-    } else {
-        remaining.as_secs().saturating_add(1)
-    }
 }
 
 fn centered_rect(
