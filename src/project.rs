@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectKind {
@@ -85,13 +85,6 @@ pub fn is_project_marker_file_name(file_name: &str) -> bool {
     PROJECT_MARKERS
         .iter()
         .any(|marker| marker.file_name == file_name)
-}
-
-pub fn project_root_from_marker(marker: &Path) -> PathBuf {
-    marker
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| marker.to_path_buf())
 }
 
 #[cfg(test)]

@@ -37,13 +37,11 @@ Important types (see `src/model.rs`):
 
 `scan::scan_workspace` (see `src/scan/mod.rs`) does roughly:
 
-1. **Collect ownership markers**: recursively find `Cargo.toml`, `package.json`, `pyproject.toml` under the provided roots, then infer candidate “project roots” from those marker parents.
-2. **Discover candidates**: recursively walk directories and match built-in rules by directory name (see `src/scan/discover.rs` and `src/rules.rs`).
-3. **Enrich candidates** (async, concurrency-limited):
-   - Determine `project_root` (nearest owner marker root, otherwise nearest CLI root).
+1. **Discover the workspace once**: `scan::discovery` walks the provided roots once to collect project markers and match built-in candidate rules (see `src/scan/discovery.rs` and `src/rules.rs`). Candidate directories and `.git` metadata are traversal boundaries, symlinked directories are not followed, overlapping roots are deduplicated, and each candidate is assigned to its nearest marker root (or nearest CLI root).
+2. **Enrich candidates** (async, concurrency-limited):
    - Compute `size_bytes`.
    - Classify `git_status` and `risk_level`.
-4. **Summarize projects**: aggregate candidates into `Project` rows for printing.
+3. **Summarize projects**: aggregate candidates into `Project` rows for printing.
 
 ### TUI architecture
 
