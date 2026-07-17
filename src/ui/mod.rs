@@ -1,7 +1,7 @@
+mod load;
 mod ops;
 mod theme;
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,7 @@ use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{DeleteFlow, DeleteRequest, execute_delete_with_config};
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
-use crate::rules::default_rules;
-use crate::scan::entry as browser_entries;
+use load::{DirectoryLoadEvent, DirectoryLoads, WorkerCommand};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -382,26 +381,21 @@ fn run_app(
 #[derive(Debug)]
 struct BrowserApp {
     state: AppState,
-    ctx: AppContext,
     root_dir: PathBuf,
-    cache: HashMap<PathBuf, Vec<BrowserEntry>>,
-    profile_cache: HashMap<PathBuf, Option<ProjectProfile>>,
+    loads: DirectoryLoads,
     icon_mode: theme::IconMode,
     ops: ops::OperationTracker,
 
     bg_tx: mpsc::UnboundedSender<BgRequest>,
     bg_rx: mpsc::UnboundedReceiver<BgResponse>,
 
-    loading_paths: HashSet<PathBuf>,
     spinner_tick: usize,
 }
 
 #[derive(Debug)]
 enum BgRequest {
-    LoadDirectory {
-        request_id: u64,
-        dir: PathBuf,
-    },
+    LoadDirectory(Box<load::DirectoryLoadRequest>),
+    CancelDirectoryLoad,
     Delete {
         request_id: u64,
         entry: Box<BrowserEntry>,
@@ -415,21 +409,7 @@ enum BgRequest {
 
 #[derive(Debug)]
 enum BgResponse {
-    DirectoryLoaded {
-        request_id: u64,
-        dir: PathBuf,
-        result: Result<Vec<BrowserEntry>, String>,
-    },
-    EntryUpdated {
-        request_id: u64,
-        dir: PathBuf,
-        entry: Box<BrowserEntry>,
-    },
-    ProjectProfileLoaded {
-        request_id: u64,
-        dir: PathBuf,
-        result: Result<Option<ProjectProfile>, String>,
-    },
+    DirectoryLoad(DirectoryLoadEvent),
     DeleteFinished {
         request_id: u64,
         entry_path: PathBuf,
@@ -446,87 +426,91 @@ impl BrowserApp {
         let (bg_tx, mut bg_req_rx) = mpsc::unbounded_channel::<BgRequest>();
         let (bg_resp_tx, bg_rx) = mpsc::unbounded_channel::<BgResponse>();
 
-        let root_dir = start_dir.clone();
         let bg_ctx = ctx.clone();
         let icon_mode = theme::IconMode::from_enabled(ctx.config().ui.icons);
         tokio::spawn(async move {
             let mut active_load: Option<tokio::task::JoinHandle<()>> = None;
             while let Some(req) = bg_req_rx.recv().await {
                 match req {
-                    BgRequest::LoadDirectory { request_id, dir } => {
+                    BgRequest::LoadDirectory(request) => {
                         if let Some(handle) = active_load.take() {
                             handle.abort();
                         }
-                        let root_dir = root_dir.clone();
-                        let bg_resp_tx = bg_resp_tx.clone();
+                        let (token, dir, seeds, current_context) = (*request).into_parts();
                         let ctx = bg_ctx.clone();
                         let entry_limit = ctx.config().performance.tui_entry_concurrency;
+                        let load_tx = bg_resp_tx.clone();
                         active_load = Some(tokio::spawn(async move {
-                            // Send a quick listing first (0B sizes) so UI can populate even if
-                            // the in-thread quick path failed.
-                            let initial = quick_browse_directory(&dir, &root_dir, &ctx);
-                            let _ = bg_resp_tx.send(BgResponse::DirectoryLoaded {
-                                request_id,
-                                dir: dir.clone(),
-                                result: initial,
-                            });
+                            let entry_tx = load_tx.clone();
+                            let entry_dir = dir.clone();
+                            let enrichment = async move {
+                                let mut jobs = JoinSet::new();
+                                for seed in seeds {
+                                    while jobs.len() >= entry_limit {
+                                        if let Some(res) = jobs.join_next().await
+                                            && let Ok(entry) = res
+                                        {
+                                            let _ = entry_tx.send(BgResponse::DirectoryLoad(
+                                                DirectoryLoadEvent::EntryUpdated {
+                                                    token,
+                                                    dir: entry_dir.clone(),
+                                                    entry: Box::new(entry),
+                                                },
+                                            ));
+                                        }
+                                    }
 
-                            let profile_tx = bg_resp_tx.clone();
+                                    let current_context = current_context.clone();
+                                    let ctx = ctx.clone();
+                                    jobs.spawn(async move {
+                                        seed.into_enriched(current_context, &ctx).await
+                                    });
+                                }
+
+                                while let Some(res) = jobs.join_next().await {
+                                    if let Ok(entry) = res {
+                                        let _ = entry_tx.send(BgResponse::DirectoryLoad(
+                                            DirectoryLoadEvent::EntryUpdated {
+                                                token,
+                                                dir: entry_dir.clone(),
+                                                entry: Box::new(entry),
+                                            },
+                                        ));
+                                    }
+                                }
+                                let _ = entry_tx.send(BgResponse::DirectoryLoad(
+                                    DirectoryLoadEvent::EntriesFinished {
+                                        token,
+                                        dir: entry_dir,
+                                    },
+                                ));
+                            };
+
+                            let profile_tx = load_tx;
                             let profile_scan_dir = dir.clone();
-                            let profile_response_dir = dir.clone();
-                            tokio::spawn(async move {
+                            let profile = async move {
                                 let profile_result = tokio::task::spawn_blocking(move || {
                                     detect_project_profile(&profile_scan_dir)
                                 })
                                 .await
                                 .map_err(|err| err.to_string())
                                 .and_then(|result| result);
-                                let _ = profile_tx.send(BgResponse::ProjectProfileLoaded {
-                                    request_id,
-                                    dir: profile_response_dir,
-                                    result: profile_result,
-                                });
-                            });
-
-                            // Then progressively compute size/git per entry and stream updates.
-                            let rules = default_rules();
-                            let Ok(seeds) = browser_entries::read_browser_entry_seeds(&dir, &rules)
-                            else {
-                                return;
+                                let _ = profile_tx.send(BgResponse::DirectoryLoad(
+                                    DirectoryLoadEvent::ProfileFinished {
+                                        token,
+                                        dir,
+                                        result: profile_result,
+                                    },
+                                ));
                             };
-                            let current_context = resolve_git_context(&dir);
 
-                            let mut jobs = JoinSet::new();
-                            for seed in seeds {
-                                while jobs.len() >= entry_limit {
-                                    if let Some(res) = jobs.join_next().await
-                                        && let Ok(entry) = res
-                                    {
-                                        let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
-                                            request_id,
-                                            dir: dir.clone(),
-                                            entry: Box::new(entry),
-                                        });
-                                    }
-                                }
-
-                                let current_context = current_context.clone();
-                                let ctx = ctx.clone();
-                                jobs.spawn(async move {
-                                    seed.into_enriched(current_context, &ctx).await
-                                });
-                            }
-
-                            while let Some(res) = jobs.join_next().await {
-                                if let Ok(entry) = res {
-                                    let _ = bg_resp_tx.send(BgResponse::EntryUpdated {
-                                        request_id,
-                                        dir: dir.clone(),
-                                        entry: Box::new(entry),
-                                    });
-                                }
-                            }
+                            tokio::join!(enrichment, profile);
                         }));
+                    }
+                    BgRequest::CancelDirectoryLoad => {
+                        if let Some(handle) = active_load.take() {
+                            handle.abort();
+                        }
                     }
                     BgRequest::Delete {
                         request_id,
@@ -567,17 +551,14 @@ impl BrowserApp {
 
         let mut app = Self {
             state: AppState::new(start_dir.clone(), Vec::new()),
-            ctx,
             root_dir: start_dir.clone(),
-            cache: HashMap::new(),
-            profile_cache: HashMap::new(),
+            loads: DirectoryLoads::new(),
             icon_mode,
             ops: ops::OperationTracker::new(),
 
             bg_tx,
             bg_rx,
 
-            loading_paths: HashSet::new(),
             spinner_tick: 0,
         };
 
@@ -588,61 +569,11 @@ impl BrowserApp {
     fn pump_background(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
-                BgResponse::DirectoryLoaded {
-                    request_id,
-                    dir,
-                    result,
-                } => {
-                    if !self.ops.is_pending_load(request_id) {
-                        continue;
-                    }
-
-                    match result {
-                        Ok(entries) => {
-                            self.cache.insert(dir.clone(), entries.clone());
-                            if self.state.current_dir() == dir.as_path()
-                                && self.state.entries.is_empty()
-                            {
-                                self.state.replace_entries(dir, entries);
-                            }
-                        }
-                        // Directory load failures do not belong to the delete lifecycle.
-                        Err(_err) => {}
-                    }
-                }
-                BgResponse::EntryUpdated {
-                    request_id,
-                    dir,
-                    entry,
-                } => {
-                    let entry = *entry;
-                    if !self.ops.is_pending_load(request_id) {
-                        continue;
-                    }
-                    if self.state.current_dir() != dir.as_path() {
-                        continue;
-                    }
-
-                    if let Some(entries) = self.cache.get_mut(&dir) {
-                        browser_entries::apply_browser_entry_update(entries, &entry);
-                        browser_entries::sort_browser_entries_by_size(entries);
-                    }
-                    browser_entries::apply_browser_entry_update(&mut self.state.entries, &entry);
-                    self.resort_visible_entries_preserving_selection();
-                    self.loading_paths.remove(&entry.path);
-                }
-                BgResponse::ProjectProfileLoaded {
-                    request_id,
-                    dir,
-                    result,
-                } => {
-                    if !self.ops.is_pending_load(request_id) {
-                        continue;
-                    }
-                    let profile = result.unwrap_or(None);
-                    self.profile_cache.insert(dir.clone(), profile.clone());
-                    if self.state.current_dir() == dir.as_path() {
-                        self.state.set_current_project_profile(profile);
+                BgResponse::DirectoryLoad(event) => {
+                    let dir = event.dir().to_path_buf();
+                    let selected_path = self.state.selected_entry().map(|entry| entry.path);
+                    if self.loads.apply(event) && self.state.current_dir() == dir.as_path() {
+                        self.sync_directory_view(&dir, selected_path.as_deref());
                     }
                 }
                 BgResponse::DeleteFinished {
@@ -655,7 +586,7 @@ impl BrowserApp {
                     }
 
                     if self.state.finish_delete(result) {
-                        ops::invalidate_related_paths(&mut self.cache, &entry_path);
+                        self.loads.invalidate_related(&entry_path);
                         let current = self.state.current_dir().to_path_buf();
                         self.load_directory(current);
                     }
@@ -667,8 +598,7 @@ impl BrowserApp {
                     if !self.ops.finish_clean(request_id) {
                         continue;
                     }
-                    ops::invalidate_related_paths(&mut self.cache, &project_root);
-                    self.profile_cache.remove(&project_root);
+                    self.loads.invalidate_related(&project_root);
                     self.state.finish_clean();
                     let current = self.state.current_dir().to_path_buf();
                     let selected_path = self.state.selected_entry().map(|entry| entry.path);
@@ -710,80 +640,32 @@ impl BrowserApp {
         dir: PathBuf,
         selected_path: Option<PathBuf>,
     ) {
-        self.loading_paths.clear();
         if self.state.current_dir() != dir.as_path() {
             self.state.clean_state = CleanState::Idle;
         }
-        if let Some(entries) = self.cache.get(&dir).cloned() {
-            self.state.replace_entries_preserving_selection(
-                dir.clone(),
-                entries,
-                selected_path.as_deref(),
-            );
-            let profile = self
-                .profile_cache
-                .get(self.state.current_dir())
-                .cloned()
-                .unwrap_or(None);
-            self.state.set_current_project_profile(profile);
-            self.loading_paths.extend(
-                self.state
-                    .entries()
-                    .iter()
-                    .filter(|entry| !matches!(entry.entry_kind, EntryKind::Parent))
-                    .filter(|entry| entry.size_bytes == 0 && entry.git_status == GitStatus::Unknown)
-                    .map(|entry| entry.path.clone()),
-            );
-            if self.profile_cache.contains_key(self.state.current_dir()) {
-                return;
-            }
-        }
-
-        // Provide a fast placeholder listing so the UI is immediately usable.
-        if let Ok(entries) = quick_browse_directory(&dir, &self.root_dir, &self.ctx) {
-            self.cache.insert(dir.clone(), entries.clone());
-            self.state.replace_entries_preserving_selection(
-                dir.clone(),
-                entries,
-                selected_path.as_deref(),
-            );
-            self.loading_paths.extend(
-                self.state
-                    .entries()
-                    .iter()
-                    .filter(|entry| !matches!(entry.entry_kind, EntryKind::Parent))
-                    .map(|entry| entry.path.clone()),
-            );
-        } else {
-            // Optimistically switch directory; entries will be populated asynchronously.
-            self.state.replace_entries_preserving_selection(
-                dir.clone(),
-                Vec::new(),
-                selected_path.as_deref(),
-            );
-        }
-
-        let request_id = self.ops.start_load();
-        let _ = self
-            .bg_tx
-            .send(BgRequest::LoadDirectory { request_id, dir });
+        let command = self.loads.open(dir.clone(), &self.root_dir);
+        self.sync_directory_view(&dir, selected_path.as_deref());
+        let request = match command {
+            WorkerCommand::Start(request) => BgRequest::LoadDirectory(request),
+            WorkerCommand::Cancel => BgRequest::CancelDirectoryLoad,
+        };
+        let _ = self.bg_tx.send(request);
     }
 
-    fn resort_visible_entries_preserving_selection(&mut self) {
-        let selected_path = self.state.selected_entry().map(|entry| entry.path);
-        browser_entries::sort_browser_entries_by_size(&mut self.state.entries);
-
-        let Some(selected_path) = selected_path else {
-            self.state.clamp_selection();
-            return;
-        };
-
-        let visible = self.state.visible_entries();
-        if let Some(idx) = visible.iter().position(|entry| entry.path == selected_path) {
-            self.state.selected_index = idx;
+    fn sync_directory_view(&mut self, dir: &Path, selected_path: Option<&Path>) {
+        let entries = self.loads.entries(dir).unwrap_or_default().to_vec();
+        if self.state.current_dir() == dir {
+            self.state.entries = entries;
+            self.state.restore_selection_by_path(selected_path);
         } else {
-            self.state.clamp_selection();
+            self.state.replace_entries_preserving_selection(
+                dir.to_path_buf(),
+                entries,
+                selected_path,
+            );
         }
+        self.state
+            .set_current_project_profile(self.loads.profile(dir).cloned());
     }
 
     fn run_trash_delete(&mut self) -> Result<(), String> {
@@ -822,29 +704,6 @@ impl BrowserApp {
     }
 }
 
-fn quick_browse_directory(
-    path: &Path,
-    root_dir: &Path,
-    _ctx: &AppContext,
-) -> Result<Vec<BrowserEntry>, String> {
-    let rules = default_rules();
-    let current_context = resolve_git_context(path);
-    let mut entries = Vec::new();
-
-    if let Some(parent) = browser_entries::parent_entry_for(path, root_dir) {
-        entries.push(parent);
-    }
-
-    entries.extend(
-        browser_entries::read_browser_entry_seeds(path, &rules)?
-            .into_iter()
-            .map(|seed| seed.into_placeholder(current_context.clone())),
-    );
-    browser_entries::sort_placeholder_entries(&mut entries);
-
-    Ok(entries)
-}
-
 fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
     let area = frame.area();
     let [header, body, footer] = Layout::default()
@@ -869,6 +728,7 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
     };
     let left = horizontal[0];
     let right = horizontal[1];
+    let current_dir = app.state.current_dir();
 
     frame.render_widget(render_header(&app.state), header);
     render_list(
@@ -876,10 +736,14 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
         left,
         &app.state,
         &app.icon_mode,
-        &app.loading_paths,
+        app.loads.loading_paths(current_dir),
+        app.loads.load_error(current_dir),
         app.spinner_tick,
     );
-    frame.render_widget(render_context(&app.state), right);
+    frame.render_widget(
+        render_context(&app.state, app.loads.profile_error(current_dir)),
+        right,
+    );
     render_footer(frame, footer, &app.state);
 
     if !matches!(app.state.delete_state(), DeleteState::Idle) {
@@ -925,16 +789,37 @@ fn render_list(
     area: Rect,
     state: &AppState,
     icon_mode: &theme::IconMode,
-    loading_paths: &HashSet<PathBuf>,
+    loading_paths: Option<&HashSet<PathBuf>>,
+    load_error: Option<&str>,
     spinner_tick: usize,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Browser");
     frame.render_widget(block.clone(), area);
 
-    let inner = area.inner(Margin {
+    let mut inner = area.inner(Margin {
         vertical: 1,
         horizontal: 1,
     });
+    if let Some(error) = load_error
+        && inner.height > 0
+    {
+        let error_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(format!("load failed: {error}")).style(Style::default().fg(Color::Red)),
+            error_area,
+        );
+        inner = Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(1),
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -1029,15 +914,16 @@ fn list_item_for_entry(
     entry: &BrowserEntry,
     is_selected: bool,
     icon_mode: &theme::IconMode,
-    loading_paths: &HashSet<PathBuf>,
+    loading_paths: Option<&HashSet<PathBuf>>,
     spinner_tick: usize,
 ) -> ListItem<'static> {
-    let size_label =
-        if loading_paths.contains(&entry.path) && !matches!(entry.entry_kind, EntryKind::Parent) {
-            spinner_label(spinner_tick).to_string()
-        } else {
-            human_bytes(entry.reclaimable_bytes)
-        };
+    let size_label = if loading_paths.is_some_and(|paths| paths.contains(&entry.path))
+        && !matches!(entry.entry_kind, EntryKind::Parent)
+    {
+        spinner_label(spinner_tick).to_string()
+    } else {
+        human_bytes(entry.reclaimable_bytes)
+    };
 
     let mut spans = vec![Span::styled(
         format!("{:>8} ", size_label),
@@ -1116,8 +1002,8 @@ fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize)
     desired.min(max_offset)
 }
 
-fn render_context(state: &AppState) -> Paragraph<'static> {
-    let lines = if let Some(entry) = state.selected_entry() {
+fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'static> {
+    let mut lines = if let Some(entry) = state.selected_entry() {
         let size_label = human_bytes(entry.size_bytes);
         let reclaimable_label = human_bytes(entry.reclaimable_bytes);
         let mut lines = vec![
@@ -1187,6 +1073,13 @@ fn render_context(state: &AppState) -> Paragraph<'static> {
     } else {
         vec![Line::raw("No entry selected")]
     };
+
+    if let Some(error) = profile_error {
+        lines.push(Line::styled(
+            format!("project profile unavailable: {error}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
 
     Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("Context"))
@@ -1339,12 +1232,38 @@ fn spinner_label(tick: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::quick_browse_directory;
-    use crate::config::AppContext;
     use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
     use crate::scan::entry as browser_entries;
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    use super::BrowserApp;
+    use crate::config::AppContext;
+
+    #[tokio::test]
+    async fn background_worker_completes_the_directory_load_session() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("README.md"), "hello").expect("file");
+        let mut app =
+            BrowserApp::new(temp.path().to_path_buf(), AppContext::default()).expect("browser app");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                app.pump_background();
+                if app.loads.is_complete(temp.path()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("directory load should complete");
+
+        assert!(app.loads.load_error(temp.path()).is_none());
+        assert_eq!(app.state.entries().len(), 1);
+        assert_eq!(app.state.entries()[0].name, "README.md");
+    }
 
     #[test]
     fn apply_entry_update_updates_matching_path_in_place() {
@@ -1434,25 +1353,5 @@ mod tests {
         assert_eq!(entries[1].entry_kind, EntryKind::File);
         assert_eq!(entries[2].name, "a");
         assert_eq!(entries[3].name, "b");
-    }
-
-    #[test]
-    fn quick_browse_directory_sorts_files_dirs_and_candidates_without_cycle() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        fs::create_dir_all(root.join("target")).expect("create target");
-        fs::create_dir_all(root.join("aaa")).expect("create directory");
-        fs::write(root.join("mmm.log"), "artifact").expect("write file");
-
-        let entries =
-            quick_browse_directory(root, root, &AppContext::default()).expect("quick browse");
-        let names = entries
-            .iter()
-            .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
-            .collect::<Vec<_>>();
-
-        assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
-        assert_eq!(names[1], ("aaa", EntryKind::Directory));
-        assert_eq!(names[2], ("mmm.log", EntryKind::File));
     }
 }
