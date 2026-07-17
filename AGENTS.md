@@ -48,7 +48,8 @@ Important types (see `src/model.rs`):
 
 The TUI loop lives in `ui::run_tui` / `run_app` (see `src/ui/mod.rs`). A `BrowserApp` owns:
 
-- `AppState`: current directory, entries, filter mode, selection index, and delete dialog state.
+- `AppState`: current directory/project context plus clean and delete flows.
+- `BrowserList` (see `src/ui/browser_list.rs`): entries, filter policy, cursor movement, and selection preservation across progressive refreshes.
 - An in-memory cache mapping `PathBuf -> Vec<BrowserEntry>`.
 - A project-profile cache mapping the current directory to optional clean/language metadata.
 - A background request/response channel that streams directory load results and per-entry updates.
@@ -103,7 +104,7 @@ The subprocess output is suppressed and calls are timeout-limited (2 seconds) (s
 - Rust edition is **2024** (see `Cargo.toml`).
 - No repo-level `rustfmt.toml` is present; formatting follows Rust defaults.
 - Public APIs across modules frequently use `Result<T, String>` for error propagation into CLI/TUI layers (e.g. `scan`, `ui`, `delete`).
-- The UI uses an explicit “fast placeholder then stream updates” pattern; when changing list behavior, ensure selection is clamped/preserved (see `AppState::clamp_selection` and `BrowserApp::resort_visible_entries_preserving_selection` in `src/ui/mod.rs`).
+- The UI uses an explicit “fast placeholder then stream updates” pattern; when changing list behavior, preserve the `BrowserList` invariants for filtered cursor clamping, wrapping, directory reset, and same-directory refresh selection.
 
 ## 4) Testing
 
