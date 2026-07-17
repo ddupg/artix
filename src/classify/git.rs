@@ -1,35 +1,9 @@
-use std::fs;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use crate::config::AppContext;
 use crate::model::{GitContext, GitStatus, HeadState};
-use crate::rules::Rule;
-
-pub fn classify_git_status(candidate: &Path, project_root: &Path, rule: &Rule) -> GitStatus {
-    let gitignore_path = project_root.join(".gitignore");
-    let Ok(contents) = fs::read_to_string(gitignore_path) else {
-        return GitStatus::Unknown;
-    };
-
-    let Some(relative_path) = candidate.strip_prefix(project_root).ok() else {
-        return GitStatus::Unknown;
-    };
-    let relative = relative_path.to_string_lossy().replace('\\', "/");
-    let dir_rule = format!("{}/", rule.dir_name);
-
-    if contents.lines().any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && (trimmed == dir_rule || trimmed == relative || trimmed == format!("{relative}/"))
-    }) {
-        GitStatus::Ignored
-    } else {
-        GitStatus::Unknown
-    }
-}
 
 pub fn resolve_git_context(path: &Path) -> Option<GitContext> {
     let repo = gix::discover(path).ok()?;
@@ -88,34 +62,43 @@ pub async fn classify_path_git_status(
     }
 
     let relative_arg = relative.to_string_lossy().to_string();
-    if git_command_succeeds(
+    match git_command_outcome(
         worktree_root,
         ["check-ignore", "-q", "--", relative_arg.as_str()],
         ctx,
     )
     .await
     {
-        GitStatus::Ignored
-    } else if git_command_succeeds(
+        GitCommandOutcome::Matched => return GitStatus::Ignored,
+        GitCommandOutcome::NotMatched => {}
+        GitCommandOutcome::Failed => return GitStatus::Unknown,
+    }
+
+    match git_command_outcome(
         worktree_root,
         ["ls-files", "--error-unmatch", "--", relative_arg.as_str()],
         ctx,
     )
     .await
     {
-        GitStatus::Tracked
-    } else if path.exists() {
-        GitStatus::Untracked
-    } else {
-        GitStatus::Unknown
+        GitCommandOutcome::Matched => GitStatus::Tracked,
+        GitCommandOutcome::NotMatched if path.exists() => GitStatus::Untracked,
+        GitCommandOutcome::NotMatched | GitCommandOutcome::Failed => GitStatus::Unknown,
     }
 }
 
-async fn git_command_succeeds<const N: usize>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitCommandOutcome {
+    Matched,
+    NotMatched,
+    Failed,
+}
+
+async fn git_command_outcome<const N: usize>(
     cwd: &Path,
     args: [&str; N],
     ctx: &AppContext,
-) -> bool {
+) -> GitCommandOutcome {
     let sem = ctx.git_semaphore();
     let _permit = sem.acquire().await.expect("semaphore must not be closed");
 
@@ -125,9 +108,9 @@ async fn git_command_succeeds<const N: usize>(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let status = match tokio::time::timeout(Duration::from_secs(2), cmd.status()).await {
-        Ok(Ok(status)) => status,
-        _ => return false,
-    };
-    status.success()
+    match tokio::time::timeout(Duration::from_secs(2), cmd.status()).await {
+        Ok(Ok(status)) if status.success() => GitCommandOutcome::Matched,
+        Ok(Ok(status)) if status.code() == Some(1) => GitCommandOutcome::NotMatched,
+        _ => GitCommandOutcome::Failed,
+    }
 }

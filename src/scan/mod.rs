@@ -6,9 +6,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::classify::git::{classify_git_status, resolve_git_context};
+use crate::classify::git::{classify_path_git_status, resolve_git_context};
 use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
-use crate::classify::risk::classify_risk_level;
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, Project};
 use crate::project::{is_project_marker_file_name, project_language_hint};
@@ -91,12 +90,8 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
         let project_roots = project_roots.clone();
         let roots = roots.clone();
         let config = ctx.config().clone();
+        let ctx = ctx.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = fs_sem
-                .acquire()
-                .await
-                .expect("semaphore must not be closed");
-
             let project_root = resolve_owner_project(&discovered.path, project_roots.as_ref())
                 .or_else(|| {
                     roots
@@ -109,25 +104,32 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
 
             let path = discovered.path.clone();
             let rule = discovered.rule.clone();
+            let git_context =
+                resolve_git_context(&path).or_else(|| resolve_git_context(&project_root));
+            let git_status = classify_path_git_status(&path, git_context.as_ref(), &ctx).await;
+            let risk_level = rule.default_risk.clone();
 
-            let candidate = tokio::task::spawn_blocking(move || {
-                let git_status = classify_git_status(&path, &project_root, &rule);
-                let risk_level = classify_risk_level(&rule, &git_status);
-                let size_bytes = crate::scan::size::dir_size_bytes_sync_with_config(&path, &config);
-
-                CandidateDir {
-                    path,
-                    project_root,
-                    kind: rule.kind.to_string(),
-                    size_bytes,
-                    git_status,
-                    risk_level,
-                    last_modified_epoch_secs: None,
-                    rule_id: rule.id.to_string(),
-                }
+            let _permit = fs_sem
+                .acquire()
+                .await
+                .expect("semaphore must not be closed");
+            let size_path = path.clone();
+            let size_bytes = tokio::task::spawn_blocking(move || {
+                crate::scan::size::dir_size_bytes_sync_with_config(&size_path, &config)
             })
             .await
             .map_err(|err| err.to_string());
+
+            let candidate = size_bytes.map(|size_bytes| CandidateDir {
+                path,
+                project_root,
+                kind: rule.kind.to_string(),
+                size_bytes,
+                git_status,
+                risk_level,
+                last_modified_epoch_secs: None,
+                rule_id: rule.id.to_string(),
+            });
 
             (idx, candidate)
         }));

@@ -14,6 +14,12 @@ use tokio::time::{Duration, timeout};
 #[tokio::test]
 async fn scan_workspace_finds_target_and_classifies_minimally() {
     let project = make_temp_project();
+    let git_init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project)
+        .status()
+        .expect("initialize git repository");
+    assert!(git_init.success());
 
     fs::write(
         project.join("Cargo.toml"),
@@ -41,10 +47,7 @@ async fn scan_workspace_finds_target_and_classifies_minimally() {
 
     assert_eq!(candidate.project_root, project);
     assert_eq!(candidate.risk_level, RiskLevel::Low);
-    assert!(matches!(
-        candidate.git_status,
-        GitStatus::Ignored | GitStatus::Unknown
-    ));
+    assert_eq!(candidate.git_status, GitStatus::Ignored);
     assert_eq!(project_summary.language_hint.as_deref(), Some("rust"));
 
     fs::remove_dir_all(&project).expect("cleanup temp project");

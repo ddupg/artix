@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::classify::git::{classify_path_git_status, resolve_git_context};
-use crate::classify::risk::classify_risk_level;
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
 use crate::rules::Rule;
@@ -59,7 +58,7 @@ impl BrowserEntrySeed {
         let risk_level = self
             .candidate_rule
             .as_ref()
-            .map(|rule| classify_risk_level(rule, &git_status))
+            .map(|rule| rule.default_risk.clone())
             .unwrap_or(RiskLevel::Hidden);
         let candidate_kind = self.candidate_rule.map(|rule| rule.kind.to_string());
         let is_visible_candidate = matches!(entry_kind, EntryKind::CleanupCandidate);
