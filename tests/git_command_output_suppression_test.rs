@@ -13,7 +13,7 @@ use tempfile::tempdir;
 // Found by /investigate on 2026-04-16
 // Report: user-reported terminal corruption during TUI browsing
 #[test]
-fn git_subprocess_output_is_suppressed_for_untracked_paths() {
+fn git_subprocess_failure_is_suppressed_and_fails_closed() {
     if env::var_os("ARTIX_TEST_CHILD_SUPPRESS_GIT").is_some() {
         child_probe();
         return;
@@ -29,7 +29,7 @@ fn git_subprocess_output_is_suppressed_for_untracked_paths() {
     let fake_git = bin_dir.join("git");
     fs::write(
         &fake_git,
-        "#!/bin/sh\nprintf 'fake git stderr noise\\n' >&2\nprintf 'fake git stdout noise\\n'\nexit 1\n",
+        "#!/bin/sh\nprintf 'fake git stderr noise\\n' >&2\nprintf 'fake git stdout noise\\n'\nexit 128\n",
     )
     .unwrap();
     let mut perms = fs::metadata(&fake_git).unwrap().permissions();
@@ -83,5 +83,5 @@ fn child_probe() {
             let ctx = AppContext::default();
             classify_path_git_status(&root.join(".gstack"), Some(&context), &ctx).await
         });
-    assert_eq!(status, GitStatus::Untracked);
+    assert_eq!(status, GitStatus::Unknown);
 }
