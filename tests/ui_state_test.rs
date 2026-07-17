@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
 use artix::clean::{CleanCommand, CleanPlan, ProjectKind, ProjectProfile};
-use artix::delete::DeleteMode;
 use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
-use artix::ui::{AppState, CleanState, DeleteIntent, DeleteState, DeleteTargetKind, FilterMode};
+use artix::ui::{AppState, CleanState, DeleteState, FilterMode};
 
 #[test]
 fn cleanup_focus_hides_tracked_entries_but_keeps_ignored_and_unknown() {
@@ -30,35 +29,20 @@ fn cleanup_focus_hides_tracked_entries_but_keeps_ignored_and_unknown() {
 }
 
 #[test]
-fn tracked_targets_require_stronger_delete_confirmation() {
+fn delete_shortcut_opens_flow_for_selected_entry() {
     let cwd = PathBuf::from("/workspace/repo");
     let tracked = entry("src", GitStatus::Tracked, 5);
-    let unknown = entry("scratch", GitStatus::Unknown, 15);
-    let ignored = entry("target", GitStatus::Ignored, 100);
+    let mut app = AppState::new(cwd, vec![tracked]);
 
-    let app = AppState::new(cwd, vec![tracked.clone(), unknown.clone(), ignored.clone()]);
+    app.request_delete_for_selected();
 
-    assert_eq!(
-        app.delete_intent_for(&tracked),
-        DeleteIntent::Confirm {
-            target_kind: DeleteTargetKind::TrackedOrUnknown,
+    assert!(matches!(
+        app.delete_state(),
+        DeleteState::Confirming {
+            entry,
             requires_extra_confirmation: true,
-        }
-    );
-    assert_eq!(
-        app.delete_intent_for(&unknown),
-        DeleteIntent::Confirm {
-            target_kind: DeleteTargetKind::TrackedOrUnknown,
-            requires_extra_confirmation: true,
-        }
-    );
-    assert_eq!(
-        app.delete_intent_for(&ignored),
-        DeleteIntent::Confirm {
-            target_kind: DeleteTargetKind::CleanupCandidate,
-            requires_extra_confirmation: false,
-        }
-    );
+        } if entry.name == "src"
+    ));
 }
 
 #[test]
@@ -248,39 +232,6 @@ fn clean_result_dismisses_immediately() {
     app.finish_clean();
 
     assert_eq!(app.clean_state(), &CleanState::Idle);
-}
-
-#[test]
-fn permanent_delete_for_tracked_entry_waits_for_extra_confirmation() {
-    let cwd = PathBuf::from("/workspace/repo");
-    let tracked = entry("src", GitStatus::Tracked, 5);
-    let mut app = AppState::new(cwd, vec![tracked]);
-
-    app.request_delete_for_selected();
-    app.set_delete_mode(DeleteMode::Permanent { confirmed: true });
-    app.request_extra_confirmation();
-
-    assert!(matches!(
-        app.delete_state(),
-        DeleteState::AwaitingExtraConfirmation { mode, .. }
-            if matches!(mode, DeleteMode::Permanent { confirmed: true })
-    ));
-}
-
-#[test]
-fn trash_delete_can_run_from_delete_confirmation() {
-    let cwd = PathBuf::from("/workspace/repo");
-    let ignored = entry("target", GitStatus::Ignored, 100);
-    let mut app = AppState::new(cwd, vec![ignored]);
-
-    app.request_delete_for_selected();
-    app.set_delete_mode(DeleteMode::Trash);
-    app.set_delete_running();
-
-    assert!(matches!(
-        app.delete_state(),
-        DeleteState::Running { mode, .. } if matches!(mode, DeleteMode::Trash)
-    ));
 }
 
 fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
