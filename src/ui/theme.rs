@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::model::{BrowserEntry, EntryKind, GitStatus, RiskLevel};
+use crate::model::{BrowserEntry, CandidateKind, EntryKind, GitStatus, RiskLevel};
 
 // ---------------------------------------------------------------------------
 // Icon mode
@@ -57,10 +57,8 @@ pub fn icon_for_entry(entry: &BrowserEntry) -> &'static str {
     if matches!(entry.entry_kind, EntryKind::File) {
         return nerd::FILE;
     }
-    if let Some(kind) = &entry.candidate_kind
-        && let Some(icon) = icon_by_candidate_kind(kind)
-    {
-        return icon;
+    if let Some(kind) = entry.entry_kind.candidate_kind() {
+        return icon_by_candidate_kind(kind);
     }
     if let Some(icon) = icon_by_name(&entry.name) {
         return icon;
@@ -68,12 +66,11 @@ pub fn icon_for_entry(entry: &BrowserEntry) -> &'static str {
     nerd::FOLDER
 }
 
-fn icon_by_candidate_kind(kind: &str) -> Option<&'static str> {
+fn icon_by_candidate_kind(kind: CandidateKind) -> &'static str {
     match kind {
-        "rust-target" => Some(nerd::RUST),
-        "node-modules" => Some(nerd::NODE),
-        "python-venv" => Some(nerd::PYTHON),
-        _ => None,
+        CandidateKind::RustTarget => nerd::RUST,
+        CandidateKind::NodeModules => nerd::NODE,
+        CandidateKind::PythonVenv => nerd::PYTHON,
     }
 }
 
@@ -155,7 +152,7 @@ pub fn name_style(entry: &BrowserEntry, is_selected: bool) -> Style {
     }
     let color = name_color(entry);
     let mut style = Style::default().fg(color);
-    if matches!(entry.entry_kind, EntryKind::CleanupCandidate) {
+    if matches!(entry.entry_kind, EntryKind::CleanupCandidate(_)) {
         style = style.add_modifier(Modifier::BOLD);
     }
     style
@@ -170,12 +167,11 @@ fn name_color(entry: &BrowserEntry) -> Color {
     }
 
     // Candidate kinds get language-specific colors
-    if let Some(kind) = &entry.candidate_kind {
-        return match kind.as_str() {
-            "rust-target" => colors::CAND_RUST,
-            "node-modules" => colors::CAND_NODE,
-            "python-venv" => colors::CAND_PYTHON,
-            _ => colors::DIR_DEFAULT,
+    if let Some(kind) = entry.entry_kind.candidate_kind() {
+        return match kind {
+            CandidateKind::RustTarget => colors::CAND_RUST,
+            CandidateKind::NodeModules => colors::CAND_NODE,
+            CandidateKind::PythonVenv => colors::CAND_PYTHON,
         };
     }
 

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artix::model::Project;
-use artix::model::{GitStatus, RiskLevel};
+use artix::model::{CandidateKind, GitStatus, RiskLevel};
 use artix::scan::scan_workspace;
 use artix::ui::build_overview_rows;
 use tokio::time::{Duration, timeout};
@@ -37,7 +37,7 @@ async fn scan_workspace_finds_target_and_classifies_minimally() {
     let candidate = report
         .candidates
         .iter()
-        .find(|candidate| candidate.rule_id == "rust.target")
+        .find(|candidate| candidate.kind == CandidateKind::RustTarget)
         .expect("rust.target candidate");
     let project_summary = report
         .projects
@@ -83,12 +83,12 @@ async fn scan_workspace_keeps_discovery_and_project_summary_in_sync() {
     assert_eq!(report.candidates.len(), 2);
     assert_eq!(report.projects.len(), 1);
 
-    let candidate_ids = report
+    let candidate_kinds = report
         .candidates
         .iter()
-        .map(|candidate| candidate.rule_id.as_str())
+        .map(|candidate| candidate.kind)
         .collect::<BTreeSet<_>>();
-    assert_eq!(candidate_ids, BTreeSet::from(["rust.target"]));
+    assert_eq!(candidate_kinds, BTreeSet::from([CandidateKind::RustTarget]));
     assert!(
         report
             .candidates
@@ -137,7 +137,7 @@ async fn scan_workspace_assigns_nested_node_modules_to_nearest_node_project() {
     let candidate = report
         .candidates
         .iter()
-        .find(|candidate| candidate.rule_id == "node.node_modules")
+        .find(|candidate| candidate.kind == CandidateKind::NodeModules)
         .expect("node.node_modules candidate");
     let project_summary = report
         .projects
@@ -174,7 +174,7 @@ async fn scan_workspace_assigns_nested_python_venv_to_nearest_python_project() {
     let candidate = report
         .candidates
         .iter()
-        .find(|candidate| candidate.rule_id == "python.venv")
+        .find(|candidate| candidate.kind == CandidateKind::PythonVenv)
         .expect("python.venv candidate");
     let project_summary = report
         .projects
@@ -254,7 +254,7 @@ async fn scan_workspace_size_does_not_follow_symlink_cycles() {
     let candidate = report
         .candidates
         .iter()
-        .find(|candidate| candidate.rule_id == "rust.target")
+        .find(|candidate| candidate.kind == CandidateKind::RustTarget)
         .expect("rust.target candidate");
 
     // "binary" is 6 bytes, and we only count the symlink itself (".." -> len 2).
@@ -301,7 +301,7 @@ async fn scan_workspace_size_does_not_follow_symlink_escape() {
     let candidate = report
         .candidates
         .iter()
-        .find(|candidate| candidate.rule_id == "rust.target")
+        .find(|candidate| candidate.kind == CandidateKind::RustTarget)
         .expect("rust.target candidate");
 
     // 6 bytes for "binary" + symlink metadata length for "../escape".

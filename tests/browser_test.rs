@@ -1,6 +1,6 @@
 use std::fs;
 
-use artix::model::EntryKind;
+use artix::model::{CandidateKind, EntryKind};
 use artix::scan::browse_directory;
 use tempfile::tempdir;
 
@@ -23,12 +23,18 @@ async fn browse_directory_root_has_no_parent_entry() {
         .expect("browse directory");
     let names = entries
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+        .map(|entry| (entry.name.as_str(), entry.entry_kind))
         .collect::<Vec<_>>();
 
     // No ".." entry at root
     assert!(!names.iter().any(|(name, _)| *name == ".."));
-    assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+    assert_eq!(
+        names[0],
+        (
+            "target",
+            EntryKind::CleanupCandidate(CandidateKind::RustTarget),
+        )
+    );
     assert_eq!(names[1], ("src", EntryKind::Directory));
 
     let src = entries
@@ -57,7 +63,7 @@ async fn browse_directory_subdirectory_has_parent_entry() {
         .expect("browse directory");
     let names = entries
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+        .map(|entry| (entry.name.as_str(), entry.entry_kind))
         .collect::<Vec<_>>();
 
     // ".." entry should be first in subdirectory
@@ -88,12 +94,24 @@ async fn browse_directory_sorts_cleanup_candidates_by_size() {
         .expect("browse directory");
     let names = entries
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+        .map(|entry| (entry.name.as_str(), entry.entry_kind))
         .collect::<Vec<_>>();
 
     // No ".." at root, sorted by size descending
-    assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
-    assert_eq!(names[1], ("node_modules", EntryKind::CleanupCandidate));
+    assert_eq!(
+        names[0],
+        (
+            "target",
+            EntryKind::CleanupCandidate(CandidateKind::RustTarget),
+        )
+    );
+    assert_eq!(
+        names[1],
+        (
+            "node_modules",
+            EntryKind::CleanupCandidate(CandidateKind::NodeModules),
+        )
+    );
     assert_eq!(names[2], ("src", EntryKind::Directory));
 }
 
@@ -113,20 +131,17 @@ async fn browse_directory_includes_files_and_sorts_by_size() {
         .expect("browse directory");
     let names = entries
         .iter()
-        .map(|entry| {
-            (
-                entry.name.as_str(),
-                entry.entry_kind.clone(),
-                entry.size_bytes,
-            )
-        })
+        .map(|entry| (entry.name.as_str(), entry.entry_kind, entry.size_bytes))
         .collect::<Vec<_>>();
 
     assert_eq!(names[0].0, "large.log");
     assert_eq!(names[0].1, EntryKind::File);
     assert_eq!(names[0].2, 50);
     assert_eq!(names[1].0, "target");
-    assert_eq!(names[1].1, EntryKind::CleanupCandidate);
+    assert_eq!(
+        names[1].1,
+        EntryKind::CleanupCandidate(CandidateKind::RustTarget)
+    );
     assert!(
         names
             .iter()

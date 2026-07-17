@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use crate::classify::git::resolve_git_context;
 use crate::clean::ProjectProfile;
 use crate::model::{BrowserEntry, EntryKind, GitContext};
-use crate::rules::default_rules;
 use crate::scan::entry::{
     self as browser_entries, BrowserEntrySeed, apply_browser_entry_update,
     sort_browser_entries_by_size, sort_placeholder_entries,
@@ -99,8 +98,7 @@ impl DirectoryLoads {
         }
 
         let current_context = resolve_git_context(&dir);
-        let rules = default_rules();
-        let seeds = match browser_entries::read_browser_entry_seeds(&dir, &rules) {
+        let seeds = match browser_entries::read_browser_entry_seeds(&dir) {
             Ok(seeds) => seeds,
             Err(err) => {
                 self.record_listing_failure(&dir, err);
@@ -364,7 +362,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::model::{EntryKind, GitStatus};
+    use crate::model::{CandidateKind, EntryKind, GitStatus};
 
     use super::{DirectoryLoadEvent, DirectoryLoads, LoadToken, WorkerCommand};
 
@@ -400,10 +398,16 @@ mod tests {
             .entries(temp.path())
             .expect("snapshot")
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+            .map(|entry| (entry.name.as_str(), entry.entry_kind))
             .collect::<Vec<_>>();
 
-        assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+        assert_eq!(
+            names[0],
+            (
+                "target",
+                EntryKind::CleanupCandidate(CandidateKind::RustTarget),
+            )
+        );
         assert_eq!(names[1], ("aaa", EntryKind::Directory));
         assert_eq!(names[2], ("mmm.log", EntryKind::File));
     }

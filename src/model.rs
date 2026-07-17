@@ -15,6 +15,13 @@ pub enum RiskLevel {
     Hidden,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CandidateKind {
+    RustTarget,
+    NodeModules,
+    PythonVenv,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum HeadState {
     Branch,
@@ -35,12 +42,21 @@ pub struct GitContext {
     pub is_worktree: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     Parent,
     File,
     Directory,
-    CleanupCandidate,
+    CleanupCandidate(CandidateKind),
+}
+
+impl EntryKind {
+    pub const fn candidate_kind(self) -> Option<CandidateKind> {
+        match self {
+            Self::CleanupCandidate(kind) => Some(kind),
+            Self::Parent | Self::File | Self::Directory => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +69,6 @@ pub struct BrowserEntry {
     pub git_status: GitStatus,
     pub git_context: GitContext,
     pub risk_level: RiskLevel,
-    pub candidate_kind: Option<String>,
-    pub is_visible_candidate: bool,
 }
 
 impl BrowserEntry {
@@ -68,8 +82,6 @@ impl BrowserEntry {
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
             risk_level: RiskLevel::Hidden,
-            candidate_kind: None,
-            is_visible_candidate: false,
         }
     }
 }
@@ -78,12 +90,11 @@ impl BrowserEntry {
 pub struct CandidateDir {
     pub path: PathBuf,
     pub project_root: PathBuf,
-    pub kind: String,
+    pub kind: CandidateKind,
     pub size_bytes: u64,
     pub git_status: GitStatus,
     pub risk_level: RiskLevel,
     pub last_modified_epoch_secs: Option<u64>,
-    pub rule_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

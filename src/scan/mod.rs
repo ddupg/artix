@@ -5,11 +5,11 @@ pub mod size;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::candidate::descriptor_for;
 use crate::classify::git::{classify_path_git_status, resolve_git_context};
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, Project};
 use crate::project::project_language_hint;
-use crate::rules::{Rule, default_rules};
 use discovery::discover_workspace;
 use entry::{parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size};
 use tokio::task::JoinSet;
@@ -30,7 +30,6 @@ pub async fn browse_directory_with_context(
     root_dir: &Path,
     ctx: &AppContext,
 ) -> Result<Vec<BrowserEntry>, String> {
-    let rules = default_rules();
     let current_context = resolve_git_context(path);
     let mut entries = Vec::new();
 
@@ -39,7 +38,7 @@ pub async fn browse_directory_with_context(
     }
 
     let mut jobs = JoinSet::new();
-    for seed in read_browser_entry_seeds(path, &rules)? {
+    for seed in read_browser_entry_seeds(path)? {
         let current_context = current_context.clone();
         let ctx = ctx.clone();
         jobs.spawn(async move { seed.into_enriched(current_context, &ctx).await });
@@ -62,13 +61,10 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
 }
 
 pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) -> ScanReport {
-    let rules = default_rules();
-    let discovery_rules = rules.clone();
     let roots_cloned = roots.to_vec();
-    let discovered =
-        tokio::task::spawn_blocking(move || discover_workspace(&roots_cloned, &discovery_rules))
-            .await
-            .unwrap_or_default();
+    let discovered = tokio::task::spawn_blocking(move || discover_workspace(&roots_cloned))
+        .await
+        .unwrap_or_default();
 
     let fs_sem = ctx.fs_semaphore();
 
@@ -80,11 +76,12 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
         handles.push(tokio::spawn(async move {
             let project_root = discovered.project_root.clone();
             let path = discovered.path.clone();
-            let rule = discovered.rule.clone();
+            let kind = discovered.kind;
+            let descriptor = descriptor_for(kind);
             let git_context =
                 resolve_git_context(&path).or_else(|| resolve_git_context(&project_root));
             let git_status = classify_path_git_status(&path, git_context.as_ref(), &ctx).await;
-            let risk_level = rule.default_risk.clone();
+            let risk_level = descriptor.default_risk.clone();
 
             let _permit = fs_sem
                 .acquire()
@@ -100,12 +97,11 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
             let candidate = size_bytes.map(|size_bytes| CandidateDir {
                 path,
                 project_root,
-                kind: rule.kind.to_string(),
+                kind,
                 size_bytes,
                 git_status,
                 risk_level,
                 last_modified_epoch_secs: None,
-                rule_id: rule.id.to_string(),
             });
 
             (idx, candidate)
@@ -124,7 +120,7 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
         .map(|(_, candidate)| candidate)
         .collect::<Vec<_>>();
 
-    let projects = summarize_projects(&candidates, &rules);
+    let projects = summarize_projects(&candidates);
 
     ScanReport {
         candidates,
@@ -132,18 +128,15 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
     }
 }
 
-fn summarize_projects(candidates: &[CandidateDir], rules: &[Rule]) -> Vec<Project> {
+fn summarize_projects(candidates: &[CandidateDir]) -> Vec<Project> {
     let mut projects = BTreeMap::<PathBuf, Project>::new();
 
     for candidate in candidates {
-        let language_hint = project_language_hint(&candidate.project_root)
-            .map(str::to_string)
-            .or_else(|| {
-                rules
-                    .iter()
-                    .find(|rule| rule.id == candidate.rule_id)
-                    .map(|rule| rule.language_hint.to_string())
-            });
+        let language_hint = Some(
+            project_language_hint(&candidate.project_root)
+                .unwrap_or(descriptor_for(candidate.kind).language_hint)
+                .to_string(),
+        );
         let project = projects
             .entry(candidate.project_root.clone())
             .or_insert_with(|| Project {

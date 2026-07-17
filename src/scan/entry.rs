@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::candidate::{classify_dir_name, descriptor_for};
 use crate::classify::git::{classify_path_git_status, resolve_git_context};
 use crate::config::AppContext;
-use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
-use crate::rules::Rule;
+use crate::model::{BrowserEntry, CandidateKind, EntryKind, GitContext, GitStatus, RiskLevel};
 
 use super::size::dir_size_bytes;
 
@@ -13,7 +13,7 @@ pub(crate) struct BrowserEntrySeed {
     path: PathBuf,
     name: String,
     is_file: bool,
-    candidate_rule: Option<Rule>,
+    candidate_kind: Option<CandidateKind>,
 }
 
 impl BrowserEntrySeed {
@@ -56,12 +56,9 @@ impl BrowserEntrySeed {
     ) -> BrowserEntry {
         let entry_kind = self.entry_kind();
         let risk_level = self
-            .candidate_rule
-            .as_ref()
-            .map(|rule| rule.default_risk.clone())
+            .candidate_kind
+            .map(|kind| descriptor_for(kind).default_risk.clone())
             .unwrap_or(RiskLevel::Hidden);
-        let candidate_kind = self.candidate_rule.map(|rule| rule.kind.to_string());
-        let is_visible_candidate = matches!(entry_kind, EntryKind::CleanupCandidate);
 
         BrowserEntry {
             path: self.path,
@@ -72,16 +69,14 @@ impl BrowserEntrySeed {
             git_status,
             git_context,
             risk_level,
-            candidate_kind,
-            is_visible_candidate,
         }
     }
 
     fn entry_kind(&self) -> EntryKind {
         if self.is_file {
             EntryKind::File
-        } else if self.candidate_rule.is_some() {
-            EntryKind::CleanupCandidate
+        } else if let Some(kind) = self.candidate_kind {
+            EntryKind::CleanupCandidate(kind)
         } else {
             EntryKind::Directory
         }
@@ -97,10 +92,7 @@ pub(crate) fn parent_entry_for(path: &Path, root_dir: &Path) -> Option<BrowserEn
         .map(|parent| BrowserEntry::parent(parent.to_path_buf()))
 }
 
-pub(crate) fn read_browser_entry_seeds(
-    path: &Path,
-    rules: &[Rule],
-) -> Result<Vec<BrowserEntrySeed>, String> {
+pub(crate) fn read_browser_entry_seeds(path: &Path) -> Result<Vec<BrowserEntrySeed>, String> {
     let read_dir = fs::read_dir(path).map_err(|err| err.to_string())?;
     let mut seeds = Vec::new();
 
@@ -112,17 +104,14 @@ pub(crate) fn read_browser_entry_seeds(
             continue;
         }
 
-        let name = entry_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        if is_dir && name == ".git" {
+        let file_name = entry_path.file_name().unwrap_or_default();
+        let name = file_name.to_string_lossy().into_owned();
+        if is_dir && file_name == ".git" {
             continue;
         }
 
-        let candidate_rule = if is_dir {
-            rules.iter().find(|rule| rule.dir_name == name).cloned()
+        let candidate_kind = if is_dir {
+            classify_dir_name(file_name)
         } else {
             None
         };
@@ -131,7 +120,7 @@ pub(crate) fn read_browser_entry_seeds(
             path: entry_path,
             name,
             is_file,
-            candidate_rule,
+            candidate_kind,
         });
     }
 
@@ -173,9 +162,7 @@ pub(crate) fn apply_browser_entry_update(entries: &mut [BrowserEntry], update: &
             entry.git_status = update.git_status.clone();
             entry.git_context = update.git_context.clone();
             entry.risk_level = update.risk_level.clone();
-            entry.entry_kind = update.entry_kind.clone();
-            entry.candidate_kind = update.candidate_kind.clone();
-            entry.is_visible_candidate = update.is_visible_candidate;
+            entry.entry_kind = update.entry_kind;
             break;
         }
     }
@@ -184,7 +171,7 @@ pub(crate) fn apply_browser_entry_update(entries: &mut [BrowserEntry], update: &
 fn placeholder_sort_rank(entry: &BrowserEntry) -> u8 {
     match entry.entry_kind {
         EntryKind::Parent => 0,
-        EntryKind::CleanupCandidate => 1,
+        EntryKind::CleanupCandidate(_) => 1,
         EntryKind::Directory | EntryKind::File => 2,
     }
 }
@@ -195,8 +182,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::model::EntryKind;
-    use crate::rules::default_rules;
+    use crate::model::{CandidateKind, EntryKind};
 
     use super::{
         parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size,
@@ -212,8 +198,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("large.log"), "x").expect("write file");
 
-        let rules = default_rules();
-        let seeds = read_browser_entry_seeds(root, &rules).expect("seeds");
+        let seeds = read_browser_entry_seeds(root).expect("seeds");
         let mut entries = seeds
             .into_iter()
             .map(|seed| seed.into_placeholder(None))
@@ -222,11 +207,17 @@ mod tests {
 
         let names = entries
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.entry_kind.clone()))
+            .map(|entry| (entry.name.as_str(), entry.entry_kind))
             .collect::<Vec<_>>();
 
         assert!(!names.iter().any(|(name, _)| *name == ".git"));
-        assert_eq!(names[0], ("target", EntryKind::CleanupCandidate));
+        assert_eq!(
+            names[0],
+            (
+                "target",
+                EntryKind::CleanupCandidate(CandidateKind::RustTarget),
+            )
+        );
         assert!(names.contains(&("src", EntryKind::Directory)));
         assert!(names.contains(&("large.log", EntryKind::File)));
     }
@@ -240,10 +231,9 @@ mod tests {
         fs::create_dir_all(child.join("target")).expect("create target");
         fs::create_dir_all(child.join("src")).expect("create src");
 
-        let rules = default_rules();
         let mut entries = vec![parent_entry_for(&child, root).expect("parent")];
         entries.extend(
-            read_browser_entry_seeds(&child, &rules)
+            read_browser_entry_seeds(&child)
                 .expect("seeds")
                 .into_iter()
                 .map(|seed| seed.into_placeholder(None)),
