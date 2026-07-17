@@ -264,8 +264,6 @@ fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
         git_status,
         git_context: GitContext::default(),
         risk_level: RiskLevel::Low,
-        candidate_kind: None,
-        is_visible_candidate: false,
     }
 }
 

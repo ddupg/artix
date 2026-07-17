@@ -16,6 +16,7 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 
+use crate::candidate::descriptor_for;
 use crate::classify::git::resolve_git_context;
 use crate::clean::{
     CleanPlan, CleanRunSummary, ProjectProfile, detect_project_profile, execute_clean_plan,
@@ -928,10 +929,10 @@ fn list_item_for_entry(
         theme::name_style(entry, is_selected),
     ));
 
-    if let Some(kind) = &entry.candidate_kind {
+    if let Some(kind) = entry.entry_kind.candidate_kind() {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            format!("[{kind}]"),
+            format!("[{}]", descriptor_for(kind).label),
             theme::candidate_badge_style(),
         ));
     }
@@ -1023,13 +1024,15 @@ fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'s
             )),
             Line::raw(format!(
                 "candidate: {}",
-                entry.candidate_kind.unwrap_or_else(|| {
-                    if matches!(entry.entry_kind, EntryKind::File) {
-                        "file".into()
+                entry
+                    .entry_kind
+                    .candidate_kind()
+                    .map(|kind| descriptor_for(kind).label)
+                    .unwrap_or_else(|| if matches!(entry.entry_kind, EntryKind::File) {
+                        "file"
                     } else {
-                        "directory".into()
-                    }
-                })
+                        "directory"
+                    })
             )),
         ];
 
@@ -1232,6 +1235,7 @@ mod tests {
 
     use super::BrowserApp;
     use crate::config::AppContext;
+    use crate::model::CandidateKind;
 
     #[tokio::test]
     async fn background_worker_completes_the_directory_load_session() {
@@ -1268,8 +1272,6 @@ mod tests {
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
             risk_level: RiskLevel::Hidden,
-            candidate_kind: None,
-            is_visible_candidate: false,
         }];
 
         let update = BrowserEntry {
@@ -1277,12 +1279,10 @@ mod tests {
             name: "a".into(),
             size_bytes: 123,
             reclaimable_bytes: 123,
-            entry_kind: EntryKind::CleanupCandidate,
+            entry_kind: EntryKind::CleanupCandidate(CandidateKind::RustTarget),
             git_status: GitStatus::Ignored,
             git_context: GitContext::default(),
             risk_level: RiskLevel::Low,
-            candidate_kind: Some("rust-target".into()),
-            is_visible_candidate: true,
         };
 
         browser_entries::apply_browser_entry_update(&mut entries, &update);
@@ -1291,9 +1291,10 @@ mod tests {
         assert_eq!(entries[0].reclaimable_bytes, 123);
         assert_eq!(entries[0].git_status, GitStatus::Ignored);
         assert_eq!(entries[0].risk_level, RiskLevel::Low);
-        assert_eq!(entries[0].entry_kind, EntryKind::CleanupCandidate);
-        assert_eq!(entries[0].candidate_kind.as_deref(), Some("rust-target"));
-        assert!(entries[0].is_visible_candidate);
+        assert_eq!(
+            entries[0].entry_kind,
+            EntryKind::CleanupCandidate(CandidateKind::RustTarget)
+        );
     }
 
     #[test]
@@ -1308,8 +1309,6 @@ mod tests {
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
                 risk_level: RiskLevel::Hidden,
-                candidate_kind: None,
-                is_visible_candidate: false,
             },
             BrowserEntry {
                 path: "/tmp/big.log".into(),
@@ -1320,8 +1319,6 @@ mod tests {
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
                 risk_level: RiskLevel::Hidden,
-                candidate_kind: None,
-                is_visible_candidate: false,
             },
             BrowserEntry::parent("/tmp".into()),
             BrowserEntry {
@@ -1333,8 +1330,6 @@ mod tests {
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
                 risk_level: RiskLevel::Hidden,
-                candidate_kind: None,
-                is_visible_candidate: false,
             },
         ];
 

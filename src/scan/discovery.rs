@@ -3,26 +3,27 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::candidate::classify_dir_name;
+use crate::model::CandidateKind;
 use crate::project::is_project_marker_file_name;
-use crate::rules::Rule;
 
 #[derive(Debug, Clone)]
 pub(super) struct DiscoveredCandidate {
     pub(super) path: PathBuf,
     pub(super) project_root: PathBuf,
-    pub(super) rule: Rule,
+    pub(super) kind: CandidateKind,
 }
 
-pub(super) fn discover_workspace(roots: &[PathBuf], rules: &[Rule]) -> Vec<DiscoveredCandidate> {
-    let mut candidate_rules = BTreeMap::<PathBuf, Rule>::new();
+pub(super) fn discover_workspace(roots: &[PathBuf]) -> Vec<DiscoveredCandidate> {
+    let mut candidate_kinds = BTreeMap::<PathBuf, CandidateKind>::new();
     let mut project_roots = BTreeSet::<PathBuf>::new();
 
     for root in roots {
-        discover_root(root, rules, &mut candidate_rules, &mut project_roots);
+        discover_root(root, &mut candidate_kinds, &mut project_roots);
     }
 
-    let candidate_paths = candidate_rules.keys().cloned().collect::<BTreeSet<_>>();
-    candidate_rules
+    let candidate_paths = candidate_kinds.keys().cloned().collect::<BTreeSet<_>>();
+    candidate_kinds
         .into_iter()
         .filter(|(path, _)| {
             !path
@@ -30,20 +31,19 @@ pub(super) fn discover_workspace(roots: &[PathBuf], rules: &[Rule]) -> Vec<Disco
                 .skip(1)
                 .any(|ancestor| candidate_paths.contains(ancestor))
         })
-        .map(|(path, rule)| DiscoveredCandidate {
+        .map(|(path, kind)| DiscoveredCandidate {
             project_root: nearest_ancestor(&path, &project_roots)
                 .or_else(|| nearest_ancestor(&path, roots))
                 .unwrap_or_else(|| path.clone()),
             path,
-            rule,
+            kind,
         })
         .collect()
 }
 
 fn discover_root(
     root: &Path,
-    rules: &[Rule],
-    candidate_rules: &mut BTreeMap<PathBuf, Rule>,
+    candidate_kinds: &mut BTreeMap<PathBuf, CandidateKind>,
     project_roots: &mut BTreeSet<PathBuf>,
 ) {
     let mut entries = WalkDir::new(root)
@@ -61,18 +61,16 @@ fn discover_root(
         }
 
         let file_type = entry.file_type();
-        let file_name = entry.file_name().to_str();
+        let file_name = entry.file_name();
 
         if file_type.is_dir() {
-            if file_name == Some(".git") {
+            if file_name == ".git" {
                 entries.skip_current_dir();
                 continue;
             }
 
-            if let Some(rule) =
-                file_name.and_then(|name| rules.iter().find(|rule| rule.dir_name == name).cloned())
-            {
-                candidate_rules.insert(entry.path().to_path_buf(), rule);
+            if let Some(kind) = classify_dir_name(file_name) {
+                candidate_kinds.insert(entry.path().to_path_buf(), kind);
                 entries.skip_current_dir();
             }
 
@@ -80,7 +78,7 @@ fn discover_root(
         }
 
         if file_type.is_file()
-            && file_name.is_some_and(is_project_marker_file_name)
+            && file_name.to_str().is_some_and(is_project_marker_file_name)
             && let Some(project_root) = entry.path().parent()
         {
             project_roots.insert(project_root.to_path_buf());
@@ -106,7 +104,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::discover_workspace;
-    use crate::rules::default_rules;
+    use crate::model::CandidateKind;
 
     #[test]
     fn discovers_hidden_ignored_candidates_and_assigns_the_nearest_project() {
@@ -118,12 +116,12 @@ mod tests {
         fs::write(app.join("pyproject.toml"), "[project]\nname = \"api\"\n")
             .expect("write project marker");
 
-        let candidates = discover_workspace(&[workspace.path().to_path_buf()], &default_rules());
+        let candidates = discover_workspace(&[workspace.path().to_path_buf()]);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, app.join(".venv"));
         assert_eq!(candidates[0].project_root, app);
-        assert_eq!(candidates[0].rule.id, "python.venv");
+        assert_eq!(candidates[0].kind, CandidateKind::PythonVenv);
     }
 
     #[test]
@@ -137,10 +135,7 @@ mod tests {
         fs::create_dir_all(workspace.path().join(".git/target/debug"))
             .expect("create git metadata candidate");
 
-        let candidates = discover_workspace(
-            &[workspace.path().to_path_buf(), dependency],
-            &default_rules(),
-        );
+        let candidates = discover_workspace(&[workspace.path().to_path_buf(), dependency]);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, workspace.path().join("node_modules"));
@@ -154,10 +149,7 @@ mod tests {
         fs::create_dir_all(app.join("target/debug")).expect("create target");
         fs::write(app.join("Cargo.toml"), "[package]\nname = \"app\"\n").expect("write marker");
 
-        let candidates = discover_workspace(
-            &[workspace.path().to_path_buf(), app.clone()],
-            &default_rules(),
-        );
+        let candidates = discover_workspace(&[workspace.path().to_path_buf(), app.clone()]);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, app.join("target"));
@@ -174,7 +166,7 @@ mod tests {
         fs::create_dir_all(outside.path().join("target/debug")).expect("create target");
         symlink(outside.path(), workspace.path().join("linked")).expect("link outside workspace");
 
-        let candidates = discover_workspace(&[workspace.path().to_path_buf()], &default_rules());
+        let candidates = discover_workspace(&[workspace.path().to_path_buf()]);
 
         assert!(candidates.is_empty());
     }

@@ -16,7 +16,7 @@ The binary has two execution modes (see `src/main.rs`):
 The library exposes these top-level modules (see `src/lib.rs`):
 
 - `model`: Domain/view models used across scan + UI.
-- `rules`: Built-in candidate directory rules.
+- `candidate`: Typed cleanup-candidate identities and their built-in descriptor catalog.
 - `scan`: Workspace scanning and directory browsing.
 - `classify`: Git/worktree context, ownership heuristics, and risk classification.
 - `ui`: TUI state, rendering, and event loop.
@@ -29,7 +29,7 @@ The library exposes these top-level modules (see `src/lib.rs`):
 Important types (see `src/model.rs`):
 
 - `BrowserEntry`: The UI list item (dir or cleanup candidate) with size, Git status, and context.
-- `CandidateDir`: A discovered “cleanup candidate” directory with owner project root, size, rule id, Git status, and risk level.
+- `CandidateDir`: A discovered “cleanup candidate” directory with owner project root, typed candidate kind, size, Git status, and risk level.
 - `Project`: Aggregated per-project totals (name, reclaimable bytes, candidate count).
 - `GitContext`: Repo/worktree roots plus branch/head metadata.
 - `ProjectProfile` / `CleanPlan`: Current TUI directory project metadata and the clean commands available for that exact directory.
@@ -38,7 +38,7 @@ Important types (see `src/model.rs`):
 
 `scan::scan_workspace` (see `src/scan/mod.rs`) does roughly:
 
-1. **Discover the workspace once**: `scan::discovery` walks the provided roots once to collect project markers and match built-in candidate rules (see `src/scan/discovery.rs` and `src/rules.rs`). Candidate directories and `.git` metadata are traversal boundaries, symlinked directories are not followed, overlapping roots are deduplicated, and each candidate is assigned to its nearest marker root (or nearest CLI root).
+1. **Discover the workspace once**: `scan::discovery` walks the provided roots once to collect project markers and classify directories through the typed candidate catalog (see `src/scan/discovery.rs` and `src/candidate.rs`). Candidate directories and `.git` metadata are traversal boundaries, symlinked directories are not followed, overlapping roots are deduplicated, and each candidate is assigned to its nearest marker root (or nearest CLI root).
 2. **Enrich candidates** (async, concurrency-limited):
    - Compute `size_bytes`.
    - Classify `git_status` and `risk_level`.
@@ -136,4 +136,4 @@ Configuration is primarily through `config.toml` loaded by `src/config.rs`.
 - **Compatibility lookup order:** `~/.config/artix/config.toml`, then `~/.artix/config.toml`.
 - **Supported user-facing fields:** `version`, `[ui].mode`, `[ui].icons`, `[performance].fs_concurrency`, `[performance].git_concurrency`, `[performance].tui_entry_concurrency`, `[scan.tui_size_budget].max_entries`, `[scan.tui_size_budget].timeout_ms`, `[delete].trash_backend`.
 
-Built-in candidate rules are still defined in `src/rules.rs`; the move to `config.toml` did not introduce an external rules file.
+Built-in candidate descriptors are defined in `src/candidate.rs`; the move to `config.toml` did not introduce an external rules file.

@@ -1,3 +1,4 @@
+pub mod candidate;
 pub mod classify;
 pub mod clean;
 pub mod clean_flow;
@@ -6,6 +7,5 @@ pub mod delete;
 pub mod delete_flow;
 pub mod model;
 pub mod project;
-pub mod rules;
 pub mod scan;
 pub mod ui;
