@@ -17,7 +17,10 @@ use ratatui::widgets::{
 };
 
 use crate::classify::git::resolve_git_context;
-use crate::clean::{CleanPlan, ProjectProfile, detect_project_profile, execute_clean_plan};
+use crate::clean::{
+    CleanPlan, CleanRunSummary, ProjectProfile, detect_project_profile, execute_clean_plan,
+};
+use crate::clean_flow::{CleanFlow, CleanRequest};
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{DeleteFlow, DeleteRequest, execute_delete_with_config};
@@ -27,14 +30,8 @@ use load::{DirectoryLoadEvent, DirectoryLoads, WorkerCommand};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+pub use crate::clean_flow::CleanState;
 pub use crate::delete_flow::DeleteState;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CleanState {
-    Idle,
-    Confirming { plan: CleanPlan },
-    Running { plan: CleanPlan },
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewRow {
@@ -80,7 +77,7 @@ pub struct AppState {
     filter_mode: FilterMode,
     selected_index: usize,
     delete_flow: DeleteFlow,
-    clean_state: CleanState,
+    clean_flow: CleanFlow,
 }
 
 impl AppState {
@@ -93,7 +90,7 @@ impl AppState {
             filter_mode: FilterMode::All,
             selected_index: 0,
             delete_flow: DeleteFlow::default(),
-            clean_state: CleanState::Idle,
+            clean_flow: CleanFlow::default(),
         }
     }
 
@@ -108,6 +105,7 @@ impl AppState {
     pub fn replace_entries(&mut self, current_dir: PathBuf, entries: Vec<BrowserEntry>) {
         self.current_git_context = resolve_git_context(&current_dir).unwrap_or_default();
         self.current_project_profile = None;
+        self.clean_flow.cancel();
         self.current_dir = current_dir;
         self.entries = entries;
         self.selected_index = 0;
@@ -138,7 +136,7 @@ impl AppState {
     pub fn set_current_project_profile(&mut self, profile: Option<ProjectProfile>) {
         self.current_project_profile = profile;
         if !self.can_clean_current_dir() {
-            self.clean_state = CleanState::Idle;
+            self.clean_flow.cancel_confirmation();
         }
     }
 
@@ -200,6 +198,9 @@ impl AppState {
     }
 
     pub fn request_delete_for_selected(&mut self) {
+        if !matches!(self.clean_flow.state(), CleanState::Idle) {
+            return;
+        }
         let Some(entry) = self.selected_entry() else {
             return;
         };
@@ -211,7 +212,7 @@ impl AppState {
     }
 
     pub fn clean_state(&self) -> &CleanState {
-        &self.clean_state
+        self.clean_flow.state()
     }
 
     pub fn can_clean_current_dir(&self) -> bool {
@@ -222,29 +223,22 @@ impl AppState {
 
     pub fn request_clean_current_dir(&mut self) {
         if !matches!(self.delete_flow.state(), DeleteState::Idle)
-            || !matches!(self.clean_state, CleanState::Idle)
+            || !matches!(self.clean_flow.state(), CleanState::Idle)
         {
             return;
         }
         let Some(profile) = &self.current_project_profile else {
             return;
         };
-        if !profile.can_clean() {
-            return;
-        }
-        self.clean_state = CleanState::Confirming {
-            plan: profile.clean_plan.clone(),
-        };
+        self.clean_flow.request(profile.clean_plan.clone());
     }
 
-    pub fn set_clean_running(&mut self) {
-        if let CleanState::Confirming { plan } = &self.clean_state {
-            self.clean_state = CleanState::Running { plan: plan.clone() };
-        }
+    pub fn confirm_clean(&mut self) -> Option<CleanRequest> {
+        self.clean_flow.confirm()
     }
 
-    pub fn finish_clean(&mut self) {
-        self.clean_state = CleanState::Idle;
+    pub fn finish_clean(&mut self, summary: CleanRunSummary) -> Option<PathBuf> {
+        self.clean_flow.finish(summary)
     }
 
     fn choose_trash_delete(&mut self) -> Option<DeleteRequest> {
@@ -261,7 +255,7 @@ impl AppState {
 
     pub fn clear_transient_state(&mut self) {
         self.delete_flow.cancel();
-        self.clean_state = CleanState::Idle;
+        self.clean_flow.cancel();
     }
 
     fn is_visible(&self, entry: &BrowserEntry) -> bool {
@@ -417,7 +411,7 @@ enum BgResponse {
     },
     CleanFinished {
         request_id: u64,
-        project_root: PathBuf,
+        summary: CleanRunSummary,
     },
 }
 
@@ -537,11 +531,10 @@ impl BrowserApp {
                     BgRequest::Clean { request_id, plan } => {
                         let bg_resp_tx = bg_resp_tx.clone();
                         tokio::spawn(async move {
-                            let project_root = plan.project_root.clone();
-                            let _summary = execute_clean_plan(plan).await;
+                            let summary = execute_clean_plan(plan).await;
                             let _ = bg_resp_tx.send(BgResponse::CleanFinished {
                                 request_id,
-                                project_root,
+                                summary,
                             });
                         });
                     }
@@ -593,13 +586,15 @@ impl BrowserApp {
                 }
                 BgResponse::CleanFinished {
                     request_id,
-                    project_root,
+                    summary,
                 } => {
                     if !self.ops.finish_clean(request_id) {
                         continue;
                     }
+                    let Some(project_root) = self.state.finish_clean(summary) else {
+                        continue;
+                    };
                     self.loads.invalidate_related(&project_root);
-                    self.state.finish_clean();
                     let current = self.state.current_dir().to_path_buf();
                     let selected_path = self.state.selected_entry().map(|entry| entry.path);
                     self.load_directory_preserving_selection(current, selected_path);
@@ -640,9 +635,6 @@ impl BrowserApp {
         dir: PathBuf,
         selected_path: Option<PathBuf>,
     ) {
-        if self.state.current_dir() != dir.as_path() {
-            self.state.clean_state = CleanState::Idle;
-        }
         let command = self.loads.open(dir.clone(), &self.root_dir);
         self.sync_directory_view(&dir, selected_path.as_deref());
         let request = match command {
@@ -676,21 +668,17 @@ impl BrowserApp {
     }
 
     fn confirm_action(&mut self) -> Result<(), String> {
-        match self.state.clean_state() {
-            CleanState::Confirming { plan } => {
-                let plan = plan.clone();
-                self.state.set_clean_running();
-                let request_id = self.ops.start_clean();
-                let _ = self.bg_tx.send(BgRequest::Clean { request_id, plan });
-                Ok(())
-            }
-            _ => {
-                if let Some(request) = self.state.confirm_permanent_delete() {
-                    self.dispatch_delete(request);
-                }
-                Ok(())
-            }
+        if let Some(request) = self.state.confirm_clean() {
+            let request_id = self.ops.start_clean();
+            let _ = self.bg_tx.send(BgRequest::Clean {
+                request_id,
+                plan: request.into_plan(),
+            });
+        } else if let Some(request) = self.state.confirm_permanent_delete() {
+            self.dispatch_delete(request);
         }
+
+        Ok(())
     }
 
     fn dispatch_delete(&mut self, request: DeleteRequest) {
@@ -1103,6 +1091,7 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
         (DeleteState::Failed { .. }, _) => "esc dismiss",
         (DeleteState::Idle, CleanState::Confirming { .. }) => "y run clean | esc cancel",
         (DeleteState::Idle, CleanState::Running { .. }) => "running clean...",
+        (DeleteState::Idle, CleanState::Failed { .. }) => "esc dismiss",
     };
 
     let block = Block::default().borders(Borders::ALL).title("Keys");
@@ -1176,6 +1165,9 @@ fn render_clean_dialog(state: &CleanState) -> Paragraph<'static> {
                 .map(|command| command.display())
                 .unwrap_or_else(|| "clean".to_string());
             vec![Line::raw(format!("Running {first} ..."))]
+        }
+        CleanState::Failed { message } => {
+            vec![Line::raw(message.clone()), Line::raw("esc: dismiss")]
         }
         CleanState::Idle => vec![Line::raw("")],
     };
