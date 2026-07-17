@@ -304,7 +304,7 @@ impl AppState {
 }
 
 pub fn build_overview_rows(mut projects: Vec<Project>) -> Vec<OverviewRow> {
-    projects.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
+    projects.sort_by_key(|project| std::cmp::Reverse(project.reclaimable_bytes));
 
     projects
         .into_iter()
