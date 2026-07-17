@@ -21,6 +21,7 @@ The library exposes these top-level modules (see `src/lib.rs`):
 - `classify`: Git/worktree context, ownership heuristics, and risk classification.
 - `ui`: TUI state, rendering, and event loop.
 - `clean`: Current-directory project/language detection plus clean command planning and execution.
+- `clean_flow`: Clean confirmation, running, completion, and failure state transitions.
 - `delete` / `delete_flow`: Delete execution + confirmation state machine.
 
 ### Data model
@@ -67,7 +68,7 @@ Clean is handled asynchronously as a separate TUI state:
 
 - Idle `x` opens a clean confirmation only when the current directory has a detected project profile and a non-empty clean plan.
 - `y` confirms clean in the clean dialog; `Esc` cancels/dismisses.
-- Clean commands run with `cwd` set to the current directory/project root and then invalidate affected cache entries.
+- Clean commands run with `cwd` set to the current directory/project root. Completion invalidates affected cache entries; success closes immediately, while failure remains visible until dismissed.
 
 ### Git/worktree context + Git status
 

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use artix::clean::{CleanCommand, CleanPlan, ProjectKind, ProjectProfile};
+use artix::clean::{
+    CleanCommand, CleanCommandResult, CleanPlan, CleanRunSummary, ProjectKind, ProjectProfile,
+};
 use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
 use artix::ui::{AppState, CleanState, DeleteState, FilterMode};
 
@@ -225,13 +227,31 @@ fn clean_shortcut_is_disabled_when_profile_has_no_commands() {
 }
 
 #[test]
-fn clean_result_dismisses_immediately() {
+fn successful_clean_result_dismisses_immediately() {
     let cwd = PathBuf::from("/workspace/repo");
-    let mut app = AppState::new(cwd, vec![]);
+    let profile = profile_with_command(cwd.clone());
+    let summary = successful_clean_summary(profile.clean_plan.clone());
+    let mut app = AppState::new(cwd.clone(), vec![]);
+    app.set_current_project_profile(Some(profile));
+    app.request_clean_current_dir();
+    app.confirm_clean().expect("clean request");
 
-    app.finish_clean();
+    let refresh_root = app.finish_clean(summary).expect("matching completion");
 
+    assert_eq!(refresh_root, cwd);
     assert_eq!(app.clean_state(), &CleanState::Idle);
+}
+
+#[test]
+fn delete_shortcut_is_disabled_while_clean_is_active() {
+    let cwd = PathBuf::from("/workspace/repo");
+    let mut app = AppState::new(cwd.clone(), vec![entry("target", GitStatus::Ignored, 10)]);
+    app.set_current_project_profile(Some(profile_with_command(cwd)));
+    app.request_clean_current_dir();
+
+    app.request_delete_for_selected();
+
+    assert_eq!(app.delete_state(), &DeleteState::Idle);
 }
 
 fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
@@ -267,5 +287,22 @@ fn profile_with_command(root: PathBuf) -> ProjectProfile {
                 cwd: root,
             }],
         },
+    }
+}
+
+fn successful_clean_summary(plan: CleanPlan) -> CleanRunSummary {
+    CleanRunSummary {
+        project_root: plan.project_root,
+        results: plan
+            .commands
+            .into_iter()
+            .map(|command| CleanCommandResult {
+                command,
+                success: true,
+                status_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+            .collect(),
     }
 }
