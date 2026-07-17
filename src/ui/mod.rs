@@ -1,3 +1,4 @@
+mod browser_list;
 mod load;
 mod ops;
 mod theme;
@@ -26,6 +27,7 @@ use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{DeleteFlow, DeleteRequest, execute_delete_with_config};
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
+use browser_list::{BrowserList, BrowserListSnapshot};
 use load::{DirectoryLoadEvent, DirectoryLoads, WorkerCommand};
 
 use tokio::sync::mpsc;
@@ -33,6 +35,7 @@ use tokio::task::JoinSet;
 
 pub use crate::clean_flow::CleanState;
 pub use crate::delete_flow::DeleteState;
+pub use browser_list::FilterMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewRow {
@@ -41,42 +44,12 @@ pub struct OverviewRow {
     pub candidate_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterMode {
-    All,
-    CleanupFocus,
-    IgnoredOnly,
-    UntrackedAndIgnored,
-}
-
-impl FilterMode {
-    pub fn next(self) -> Self {
-        match self {
-            Self::All => Self::CleanupFocus,
-            Self::CleanupFocus => Self::IgnoredOnly,
-            Self::IgnoredOnly => Self::UntrackedAndIgnored,
-            Self::UntrackedAndIgnored => Self::All,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::CleanupFocus => "Cleanup Focus",
-            Self::IgnoredOnly => "Ignored Only",
-            Self::UntrackedAndIgnored => "Untracked + Ignored",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     current_dir: PathBuf,
     current_git_context: GitContext,
     current_project_profile: Option<ProjectProfile>,
-    entries: Vec<BrowserEntry>,
-    filter_mode: FilterMode,
-    selected_index: usize,
+    browser_list: BrowserList,
     delete_flow: DeleteFlow,
     clean_flow: CleanFlow,
 }
@@ -87,9 +60,7 @@ impl AppState {
             current_git_context: resolve_git_context(&current_dir).unwrap_or_default(),
             current_project_profile: None,
             current_dir,
-            entries,
-            filter_mode: FilterMode::All,
-            selected_index: 0,
+            browser_list: BrowserList::new(entries),
             delete_flow: DeleteFlow::default(),
             clean_flow: CleanFlow::default(),
         }
@@ -100,16 +71,12 @@ impl AppState {
     }
 
     pub fn entries(&self) -> &[BrowserEntry] {
-        &self.entries
+        self.browser_list.entries()
     }
 
     pub fn replace_entries(&mut self, current_dir: PathBuf, entries: Vec<BrowserEntry>) {
-        self.current_git_context = resolve_git_context(&current_dir).unwrap_or_default();
-        self.current_project_profile = None;
-        self.clean_flow.cancel();
-        self.current_dir = current_dir;
-        self.entries = entries;
-        self.selected_index = 0;
+        self.switch_directory(current_dir);
+        self.browser_list.reset(entries);
     }
 
     pub fn replace_entries_preserving_selection(
@@ -118,12 +85,13 @@ impl AppState {
         entries: Vec<BrowserEntry>,
         selected_path: Option<&Path>,
     ) {
-        self.replace_entries(current_dir, entries);
-        self.restore_selection_by_path(selected_path);
+        self.switch_directory(current_dir);
+        self.browser_list
+            .reset_preserving_selection(entries, selected_path);
     }
 
     pub fn filter_mode(&self) -> FilterMode {
-        self.filter_mode
+        self.browser_list.filter_mode()
     }
 
     pub fn current_git_context(&self) -> &GitContext {
@@ -142,60 +110,41 @@ impl AppState {
     }
 
     pub fn set_filter_mode(&mut self, filter_mode: FilterMode) {
-        self.filter_mode = filter_mode;
-        self.clamp_selection();
+        self.browser_list.set_filter_mode(filter_mode);
     }
 
     pub fn cycle_filter_mode(&mut self) {
-        self.filter_mode = self.filter_mode.next();
-        self.clamp_selection();
+        self.browser_list.cycle_filter_mode();
     }
 
     pub fn visible_entries(&self) -> Vec<BrowserEntry> {
-        self.entries
+        self.browser_list
+            .snapshot()
+            .entries()
             .iter()
-            .filter(|entry| self.is_visible(entry))
+            .copied()
             .cloned()
             .collect()
     }
 
     pub fn selected_entry(&self) -> Option<BrowserEntry> {
-        self.visible_entries().get(self.selected_index).cloned()
+        self.browser_list.selected().cloned()
     }
 
     pub fn move_selection_down(&mut self) {
-        let len = self.visible_entries().len();
-        if len == 0 {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = if self.selected_index + 1 >= len {
-                0
-            } else {
-                self.selected_index + 1
-            };
-        }
+        self.browser_list.move_next();
     }
 
     pub fn move_selection_up(&mut self) {
-        let len = self.visible_entries().len();
-        if len == 0 {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = if self.selected_index == 0 {
-                len.saturating_sub(1)
-            } else {
-                self.selected_index.saturating_sub(1)
-            };
-        }
+        self.browser_list.move_previous();
     }
 
     pub fn jump_to_first(&mut self) {
-        self.selected_index = 0;
+        self.browser_list.jump_first();
     }
 
     pub fn jump_to_last(&mut self) {
-        let len = self.visible_entries().len();
-        self.selected_index = if len == 0 { 0 } else { len - 1 };
+        self.browser_list.jump_last();
     }
 
     pub fn request_delete_for_selected(&mut self) {
@@ -259,42 +208,23 @@ impl AppState {
         self.clean_flow.cancel();
     }
 
-    fn is_visible(&self, entry: &BrowserEntry) -> bool {
-        if matches!(entry.entry_kind, EntryKind::Parent) {
-            return true;
-        }
-
-        match self.filter_mode {
-            FilterMode::All => true,
-            FilterMode::CleanupFocus => !matches!(entry.git_status, GitStatus::Tracked),
-            FilterMode::IgnoredOnly => matches!(entry.git_status, GitStatus::Ignored),
-            FilterMode::UntrackedAndIgnored => {
-                matches!(entry.git_status, GitStatus::Ignored | GitStatus::Untracked)
-            }
-        }
+    fn selected_entry_ref(&self) -> Option<&BrowserEntry> {
+        self.browser_list.selected()
     }
 
-    fn clamp_selection(&mut self) {
-        let len = self.visible_entries().len();
-        if len == 0 {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = self.selected_index.min(len - 1);
-        }
+    fn list_snapshot(&self) -> BrowserListSnapshot<'_> {
+        self.browser_list.snapshot()
     }
 
-    fn restore_selection_by_path(&mut self, selected_path: Option<&Path>) {
-        let Some(selected_path) = selected_path else {
-            self.clamp_selection();
-            return;
-        };
+    fn refresh_entries(&mut self, entries: Vec<BrowserEntry>) {
+        self.browser_list.refresh(entries);
+    }
 
-        let visible = self.visible_entries();
-        if let Some(idx) = visible.iter().position(|entry| entry.path == selected_path) {
-            self.selected_index = idx;
-        } else {
-            self.clamp_selection();
-        }
+    fn switch_directory(&mut self, current_dir: PathBuf) {
+        self.current_git_context = resolve_git_context(&current_dir).unwrap_or_default();
+        self.current_project_profile = None;
+        self.clean_flow.cancel();
+        self.current_dir = current_dir;
     }
 }
 
@@ -565,9 +495,8 @@ impl BrowserApp {
             match msg {
                 BgResponse::DirectoryLoad(event) => {
                     let dir = event.dir().to_path_buf();
-                    let selected_path = self.state.selected_entry().map(|entry| entry.path);
                     if self.loads.apply(event) && self.state.current_dir() == dir.as_path() {
-                        self.sync_directory_view(&dir, selected_path.as_deref());
+                        self.sync_directory_view(&dir);
                     }
                 }
                 BgResponse::DeleteFinished {
@@ -597,8 +526,7 @@ impl BrowserApp {
                     };
                     self.loads.invalidate_related(&project_root);
                     let current = self.state.current_dir().to_path_buf();
-                    let selected_path = self.state.selected_entry().map(|entry| entry.path);
-                    self.load_directory_preserving_selection(current, selected_path);
+                    self.load_directory(current);
                 }
             }
         }
@@ -628,16 +556,8 @@ impl BrowserApp {
     }
 
     fn load_directory(&mut self, dir: PathBuf) {
-        self.load_directory_preserving_selection(dir, None);
-    }
-
-    fn load_directory_preserving_selection(
-        &mut self,
-        dir: PathBuf,
-        selected_path: Option<PathBuf>,
-    ) {
         let command = self.loads.open(dir.clone(), &self.root_dir);
-        self.sync_directory_view(&dir, selected_path.as_deref());
+        self.sync_directory_view(&dir);
         let request = match command {
             WorkerCommand::Start(request) => BgRequest::LoadDirectory(request),
             WorkerCommand::Cancel => BgRequest::CancelDirectoryLoad,
@@ -645,17 +565,12 @@ impl BrowserApp {
         let _ = self.bg_tx.send(request);
     }
 
-    fn sync_directory_view(&mut self, dir: &Path, selected_path: Option<&Path>) {
+    fn sync_directory_view(&mut self, dir: &Path) {
         let entries = self.loads.entries(dir).unwrap_or_default().to_vec();
         if self.state.current_dir() == dir {
-            self.state.entries = entries;
-            self.state.restore_selection_by_path(selected_path);
+            self.state.refresh_entries(entries);
         } else {
-            self.state.replace_entries_preserving_selection(
-                dir.to_path_buf(),
-                entries,
-                selected_path,
-            );
+            self.state.replace_entries(dir.to_path_buf(), entries);
         }
         self.state
             .set_current_project_profile(self.loads.profile(dir).cloned());
@@ -813,18 +728,13 @@ fn render_list(
         return;
     }
 
-    let visible = state.visible_entries();
+    let snapshot = state.list_snapshot();
+    let visible = snapshot.entries();
     let len = visible.len();
-    let selected_index = if len == 0 {
-        0
-    } else {
-        state.selected_index.min(len - 1)
-    };
+    let selected_index = snapshot.selected_index();
 
     // Draw "x of y" on the list border (inside the frame line).
     render_list_counter(frame, area, selected_index, len);
-    let selected_path = visible.get(selected_index).map(|entry| entry.path.clone());
-
     let viewport_len = inner.height as usize;
     let scroll_offset = compute_scroll_offset(len, selected_index, viewport_len);
 
@@ -850,10 +760,9 @@ fn render_list(
     let end = (start + viewport_len).min(len);
     let items = visible[start..end]
         .iter()
-        .map(|entry| {
-            let is_selected = selected_path
-                .as_ref()
-                .is_some_and(|path| path == &entry.path);
+        .enumerate()
+        .map(|(offset, entry)| {
+            let is_selected = start + offset == selected_index;
             list_item_for_entry(entry, is_selected, icon_mode, loading_paths, spinner_tick)
         })
         .collect::<Vec<_>>();
@@ -992,7 +901,7 @@ fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize)
 }
 
 fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'static> {
-    let mut lines = if let Some(entry) = state.selected_entry() {
+    let mut lines = if let Some(entry) = state.selected_entry_ref() {
         let size_label = human_bytes(entry.size_bytes);
         let reclaimable_label = human_bytes(entry.reclaimable_bytes);
         let mut lines = vec![
@@ -1020,7 +929,7 @@ fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'s
             )),
             Line::raw(format!(
                 "branch: {}",
-                entry.git_context.branch_name.unwrap_or_else(|| "—".into())
+                entry.git_context.branch_name.as_deref().unwrap_or("—")
             )),
             Line::raw(format!(
                 "candidate: {}",
