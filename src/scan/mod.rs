@@ -1,18 +1,16 @@
-pub mod discover;
+mod discovery;
 pub(crate) mod entry;
 pub mod size;
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::classify::git::{classify_path_git_status, resolve_git_context};
-use crate::classify::ownership::{infer_project_roots, resolve_owner_project};
 use crate::config::AppContext;
 use crate::model::{BrowserEntry, CandidateDir, Project};
-use crate::project::{is_project_marker_file_name, project_language_hint};
+use crate::project::project_language_hint;
 use crate::rules::{Rule, default_rules};
-use discover::discover_candidates;
+use discovery::discover_workspace;
 use entry::{parent_entry_for, read_browser_entry_seeds, sort_browser_entries_by_size};
 use tokio::task::JoinSet;
 
@@ -65,43 +63,22 @@ pub async fn scan_workspace(roots: &[PathBuf]) -> ScanReport {
 
 pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) -> ScanReport {
     let rules = default_rules();
+    let discovery_rules = rules.clone();
     let roots_cloned = roots.to_vec();
-    let ownership_markers =
-        tokio::task::spawn_blocking(move || collect_ownership_markers(&roots_cloned))
+    let discovered =
+        tokio::task::spawn_blocking(move || discover_workspace(&roots_cloned, &discovery_rules))
             .await
             .unwrap_or_default();
-    let project_roots = infer_project_roots(&ownership_markers);
-
-    let rules_for_discover = rules.clone();
-    let roots_cloned = roots.to_vec();
-    let discovered = tokio::task::spawn_blocking(move || {
-        discover_candidates(&roots_cloned, &rules_for_discover)
-    })
-    .await
-    .unwrap_or_default();
 
     let fs_sem = ctx.fs_semaphore();
-    let roots = std::sync::Arc::new(roots.to_vec());
-    let project_roots = std::sync::Arc::new(project_roots);
 
     let mut handles = Vec::with_capacity(discovered.len());
     for (idx, discovered) in discovered.into_iter().enumerate() {
         let fs_sem = fs_sem.clone();
-        let project_roots = project_roots.clone();
-        let roots = roots.clone();
         let config = ctx.config().clone();
         let ctx = ctx.clone();
         handles.push(tokio::spawn(async move {
-            let project_root = resolve_owner_project(&discovered.path, project_roots.as_ref())
-                .or_else(|| {
-                    roots
-                        .iter()
-                        .filter(|root| discovered.path.starts_with(root))
-                        .max_by_key(|root| root.components().count())
-                        .cloned()
-                })
-                .unwrap_or_else(|| discovered.path.clone());
-
+            let project_root = discovered.project_root.clone();
             let path = discovered.path.clone();
             let rule = discovered.rule.clone();
             let git_context =
@@ -152,42 +129,6 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
     ScanReport {
         candidates,
         projects,
-    }
-}
-
-fn collect_ownership_markers(roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut markers = Vec::new();
-
-    for root in roots {
-        collect_ownership_markers_from_path(root, &mut markers);
-    }
-
-    markers
-}
-
-fn collect_ownership_markers_from_path(path: &Path, markers: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-
-        if entry_path.is_file() {
-            let Some(file_name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-
-            if is_project_marker_file_name(file_name) {
-                markers.push(entry_path);
-            }
-
-            continue;
-        }
-
-        if entry_path.is_dir() {
-            collect_ownership_markers_from_path(&entry_path, markers);
-        }
     }
 }
 

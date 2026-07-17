@@ -9,13 +9,13 @@ crossterm = "0.29.0"
 directories = "6"
 gix = { version = "0.85.0", default-features = false, features = ["excludes", "sha1"] }
 gengo = { version = "0.14.3", default-features = false, features = ["directory"] }
-ignore = "0.4"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
 toml = "1.1"
 trash = "5"
+walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
