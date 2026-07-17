@@ -20,7 +20,7 @@ use crate::classify::git::resolve_git_context;
 use crate::clean::{CleanPlan, ProjectProfile, detect_project_profile, execute_clean_plan};
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
-use crate::delete_flow::{delete_intent_for, execute_delete_with_config};
+use crate::delete_flow::{DeleteFlow, DeleteRequest, execute_delete_with_config};
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
 use crate::rules::default_rules;
 use crate::scan::entry as browser_entries;
@@ -28,7 +28,7 @@ use crate::scan::entry as browser_entries;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-pub use crate::delete_flow::{DeleteIntent, DeleteState, DeleteTargetKind};
+pub use crate::delete_flow::DeleteState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanState {
@@ -80,7 +80,7 @@ pub struct AppState {
     entries: Vec<BrowserEntry>,
     filter_mode: FilterMode,
     selected_index: usize,
-    delete_state: DeleteState,
+    delete_flow: DeleteFlow,
     clean_state: CleanState,
 }
 
@@ -93,7 +93,7 @@ impl AppState {
             entries,
             filter_mode: FilterMode::All,
             selected_index: 0,
-            delete_state: DeleteState::Idle,
+            delete_flow: DeleteFlow::default(),
             clean_state: CleanState::Idle,
         }
     }
@@ -200,28 +200,15 @@ impl AppState {
         self.selected_index = if len == 0 { 0 } else { len - 1 };
     }
 
-    pub fn delete_intent_for(&self, entry: &BrowserEntry) -> DeleteIntent {
-        delete_intent_for(entry)
-    }
-
     pub fn request_delete_for_selected(&mut self) {
         let Some(entry) = self.selected_entry() else {
             return;
         };
-        let DeleteIntent::Confirm {
-            target_kind,
-            requires_extra_confirmation,
-        } = self.delete_intent_for(&entry);
-        self.delete_state = DeleteState::Confirming {
-            entry,
-            target_kind,
-            requires_extra_confirmation,
-            requested_mode: None,
-        };
+        self.delete_flow.request(entry);
     }
 
     pub fn delete_state(&self) -> &DeleteState {
-        &self.delete_state
+        self.delete_flow.state()
     }
 
     pub fn clean_state(&self) -> &CleanState {
@@ -235,7 +222,7 @@ impl AppState {
     }
 
     pub fn request_clean_current_dir(&mut self) {
-        if !matches!(self.delete_state, DeleteState::Idle)
+        if !matches!(self.delete_flow.state(), DeleteState::Idle)
             || !matches!(self.clean_state, CleanState::Idle)
         {
             return;
@@ -261,52 +248,20 @@ impl AppState {
         self.clean_state = CleanState::Idle;
     }
 
-    pub fn set_delete_mode(&mut self, mode: DeleteMode) {
-        if let DeleteState::Confirming { requested_mode, .. } = &mut self.delete_state {
-            *requested_mode = Some(mode);
-        }
+    fn choose_trash_delete(&mut self) -> Option<DeleteRequest> {
+        self.delete_flow.choose_trash()
     }
 
-    pub fn set_delete_running(&mut self) {
-        if let DeleteState::Confirming {
-            entry,
-            requested_mode: Some(mode),
-            ..
-        } = &self.delete_state
-        {
-            self.delete_state = DeleteState::Running {
-                entry: entry.clone(),
-                mode: mode.clone(),
-            };
-        }
+    fn confirm_permanent_delete(&mut self) -> Option<DeleteRequest> {
+        self.delete_flow.confirm_permanent()
     }
 
-    pub fn request_extra_confirmation(&mut self) {
-        if let DeleteState::Confirming {
-            entry,
-            target_kind,
-            requires_extra_confirmation: true,
-            requested_mode: Some(mode),
-        } = &self.delete_state
-        {
-            self.delete_state = DeleteState::AwaitingExtraConfirmation {
-                entry: entry.clone(),
-                mode: mode.clone(),
-                target_kind: target_kind.clone(),
-            };
-        }
-    }
-
-    pub fn finish_delete_failure(&mut self, message: String) {
-        self.delete_state = DeleteState::Failed { message };
-    }
-
-    pub fn clear_delete_state(&mut self) {
-        self.delete_state = DeleteState::Idle;
+    fn finish_delete(&mut self, result: Result<String, String>) -> bool {
+        self.delete_flow.finish(result)
     }
 
     pub fn clear_transient_state(&mut self) {
-        self.delete_state = DeleteState::Idle;
+        self.delete_flow.cancel();
         self.clean_state = CleanState::Idle;
     }
 
@@ -412,9 +367,7 @@ fn run_app(
             KeyCode::Char('f') => app.state.cycle_filter_mode(),
             KeyCode::Char('d') => app.state.request_delete_for_selected(),
             KeyCode::Char('x') => app.state.request_clean_current_dir(),
-            KeyCode::Char('t') => app
-                .run_delete(DeleteMode::Trash)
-                .map_err(io::Error::other)?,
+            KeyCode::Char('t') => app.run_trash_delete().map_err(io::Error::other)?,
             KeyCode::Char('y') => {
                 app.confirm_action().map_err(io::Error::other)?;
             }
@@ -653,9 +606,8 @@ impl BrowserApp {
                                 self.state.replace_entries(dir, entries);
                             }
                         }
-                        Err(err) => {
-                            self.state.finish_delete_failure(err);
-                        }
+                        // Directory load failures do not belong to the delete lifecycle.
+                        Err(_err) => {}
                     }
                 }
                 BgResponse::EntryUpdated {
@@ -702,14 +654,10 @@ impl BrowserApp {
                         continue;
                     }
 
-                    match result {
-                        Ok(_message) => {
-                            ops::invalidate_related_paths(&mut self.cache, &entry_path);
-                            let current = self.state.current_dir().to_path_buf();
-                            self.state.clear_delete_state();
-                            self.load_directory(current);
-                        }
-                        Err(err) => self.state.finish_delete_failure(err),
+                    if self.state.finish_delete(result) {
+                        ops::invalidate_related_paths(&mut self.cache, &entry_path);
+                        let current = self.state.current_dir().to_path_buf();
+                        self.load_directory(current);
                     }
                 }
                 BgResponse::CleanFinished {
@@ -838,34 +786,11 @@ impl BrowserApp {
         }
     }
 
-    fn run_delete(&mut self, mode: DeleteMode) -> Result<(), String> {
-        match self.state.delete_state() {
-            DeleteState::Confirming {
-                requires_extra_confirmation: true,
-                ..
-            } if matches!(mode, DeleteMode::Permanent { .. }) => {
-                self.state.set_delete_mode(mode);
-                self.state.request_extra_confirmation();
-                Ok(())
-            }
-            DeleteState::Confirming { .. } => {
-                self.state.set_delete_mode(mode.clone());
-                self.state.set_delete_running();
-                let entry = match self.state.delete_state() {
-                    DeleteState::Running { entry, .. } => entry.clone(),
-                    _ => return Ok(()),
-                };
-
-                let request_id = self.ops.start_delete();
-                let _ = self.bg_tx.send(BgRequest::Delete {
-                    request_id,
-                    entry: Box::new(entry),
-                    mode,
-                });
-                Ok(())
-            }
-            _ => Ok(()),
+    fn run_trash_delete(&mut self) -> Result<(), String> {
+        if let Some(request) = self.state.choose_trash_delete() {
+            self.dispatch_delete(request);
         }
+        Ok(())
     }
 
     fn confirm_action(&mut self) -> Result<(), String> {
@@ -877,37 +802,23 @@ impl BrowserApp {
                 let _ = self.bg_tx.send(BgRequest::Clean { request_id, plan });
                 Ok(())
             }
-            _ if matches!(
-                self.state.delete_state(),
-                DeleteState::AwaitingExtraConfirmation { .. }
-            ) =>
-            {
-                self.confirm_extra_delete()
+            _ => {
+                if let Some(request) = self.state.confirm_permanent_delete() {
+                    self.dispatch_delete(request);
+                }
+                Ok(())
             }
-            _ if matches!(self.state.delete_state(), DeleteState::Confirming { .. }) => {
-                self.run_delete(DeleteMode::Permanent { confirmed: true })
-            }
-            _ => Ok(()),
         }
     }
 
-    fn confirm_extra_delete(&mut self) -> Result<(), String> {
-        let (entry, mode) = match self.state.delete_state() {
-            DeleteState::AwaitingExtraConfirmation { entry, mode, .. } => {
-                (entry.clone(), mode.clone())
-            }
-            _ => return Ok(()),
-        };
-
-        self.state.set_delete_running();
-
+    fn dispatch_delete(&mut self, request: DeleteRequest) {
+        let (entry, mode) = request.into_parts();
         let request_id = self.ops.start_delete();
         let _ = self.bg_tx.send(BgRequest::Delete {
             request_id,
             entry: Box::new(entry),
             mode,
         });
-        Ok(())
     }
 }
 
@@ -1333,7 +1244,7 @@ fn render_delete_dialog(state: &DeleteState) -> Paragraph<'static> {
             Line::raw("y: permanent delete"),
             Line::raw("esc: cancel"),
         ],
-        DeleteState::AwaitingExtraConfirmation { entry, .. } => vec![
+        DeleteState::AwaitingExtraConfirmation { entry } => vec![
             Line::raw(format!("Dangerous delete for {}", entry.path.display())),
             Line::raw("This target is tracked or unknown."),
             Line::raw("Press y to confirm permanent delete."),
