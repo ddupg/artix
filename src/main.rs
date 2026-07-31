@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use artix::config::{
     AppContext, UiMode, init_default_config_file, load_config, render_default_config_toml,
 };
+use artix::model::SizeStatus;
 use artix::scan::scan_workspace_with_context;
 use artix::ui::{build_overview_rows, run_tui_with_context};
 
@@ -100,6 +101,14 @@ async fn run_app(roots: Vec<PathBuf>) {
     }
 
     let report = scan_workspace_with_context(&roots, &ctx).await;
+    for candidate in &report.candidates {
+        if candidate.size_status == SizeStatus::Incomplete {
+            eprintln!(
+                "artix: warning: incomplete size measurement for {}",
+                candidate.path.display()
+            );
+        }
+    }
     let rows = build_overview_rows(report.projects);
 
     for row in rows {

@@ -820,7 +820,12 @@ fn list_item_for_entry(
     {
         spinner_label(spinner_tick).to_string()
     } else {
-        human_bytes(entry.reclaimable_bytes)
+        let label = human_bytes(entry.reclaimable_bytes);
+        if entry.size_status.is_complete() {
+            label
+        } else {
+            format!("~{label}")
+        }
     };
 
     let mut spans = vec![Span::styled(
@@ -908,6 +913,14 @@ fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'s
             Line::raw(format!("path: {}", entry.path.display())),
             Line::raw(format!("size: {}", size_label)),
             Line::raw(format!("reclaimable: {}", reclaimable_label)),
+            Line::raw(format!(
+                "size status: {}",
+                if entry.size_status.is_complete() {
+                    "complete"
+                } else {
+                    "incomplete"
+                }
+            )),
             Line::raw(format!("git: {:?}", entry.git_status)),
             Line::raw(format!(
                 "repo root: {}",
@@ -1136,7 +1149,7 @@ fn spinner_label(tick: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel, SizeStatus};
     use crate::scan::entry as browser_entries;
     use std::fs;
     use std::time::Duration;
@@ -1177,6 +1190,7 @@ mod tests {
             name: "a".into(),
             size_bytes: 0,
             reclaimable_bytes: 0,
+            size_status: SizeStatus::Complete,
             entry_kind: EntryKind::Directory,
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
@@ -1188,6 +1202,7 @@ mod tests {
             name: "a".into(),
             size_bytes: 123,
             reclaimable_bytes: 123,
+            size_status: SizeStatus::Complete,
             entry_kind: EntryKind::CleanupCandidate(CandidateKind::RustTarget),
             git_status: GitStatus::Ignored,
             git_context: GitContext::default(),
@@ -1198,6 +1213,7 @@ mod tests {
 
         assert_eq!(entries[0].size_bytes, 123);
         assert_eq!(entries[0].reclaimable_bytes, 123);
+        assert_eq!(entries[0].size_status, SizeStatus::Complete);
         assert_eq!(entries[0].git_status, GitStatus::Ignored);
         assert_eq!(entries[0].risk_level, RiskLevel::Low);
         assert_eq!(
@@ -1214,6 +1230,7 @@ mod tests {
                 name: "b".into(),
                 size_bytes: 10,
                 reclaimable_bytes: 10,
+                size_status: SizeStatus::Complete,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -1224,6 +1241,7 @@ mod tests {
                 name: "big.log".into(),
                 size_bytes: 250,
                 reclaimable_bytes: 250,
+                size_status: SizeStatus::Complete,
                 entry_kind: EntryKind::File,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),
@@ -1235,6 +1253,7 @@ mod tests {
                 name: "a".into(),
                 size_bytes: 99,
                 reclaimable_bytes: 99,
+                size_status: SizeStatus::Complete,
                 entry_kind: EntryKind::Directory,
                 git_status: GitStatus::Unknown,
                 git_context: GitContext::default(),

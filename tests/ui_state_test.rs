@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use artix::clean::{
     CleanCommand, CleanCommandResult, CleanPlan, CleanRunSummary, ProjectKind, ProjectProfile,
 };
-use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel, SizeStatus};
 use artix::ui::{AppState, CleanState, DeleteState, FilterMode};
 
 #[test]
@@ -260,6 +260,7 @@ fn entry(name: &str, git_status: GitStatus, size_bytes: u64) -> BrowserEntry {
         name: name.to_string(),
         size_bytes,
         reclaimable_bytes: size_bytes,
+        size_status: SizeStatus::Complete,
         entry_kind: EntryKind::Directory,
         git_status,
         git_context: GitContext::default(),

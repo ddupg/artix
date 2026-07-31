@@ -1,7 +1,9 @@
 use std::ffi::OsStr;
 
 use artix::candidate::{classify_dir_name, descriptor_for, descriptors};
-use artix::model::{CandidateDir, CandidateKind, EntryKind, GitStatus, Project, RiskLevel};
+use artix::model::{
+    CandidateDir, CandidateKind, EntryKind, GitStatus, Project, RiskLevel, SizeStatus,
+};
 
 #[test]
 fn candidate_dir_uses_typed_identity() {
@@ -10,6 +12,7 @@ fn candidate_dir_uses_typed_identity() {
         project_root: "/tmp/ws/demo".into(),
         kind: CandidateKind::RustTarget,
         size_bytes: 1024,
+        size_status: SizeStatus::Complete,
         git_status: GitStatus::Unknown,
         risk_level: RiskLevel::Low,
         last_modified_epoch_secs: Some(1),

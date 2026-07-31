@@ -45,9 +45,8 @@ pub async fn browse_directory_with_context(
     }
 
     while let Some(res) = jobs.join_next().await {
-        if let Ok(entry) = res {
-            entries.push(entry);
-        }
+        let entry = res.map_err(|err| format!("browser entry enrichment failed: {err}"))?;
+        entries.push(entry);
     }
 
     sort_browser_entries_by_size(&mut entries);
@@ -70,49 +69,52 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
 
     let mut handles = Vec::with_capacity(discovered.len());
     for (idx, discovered) in discovered.into_iter().enumerate() {
+        let descriptor = descriptor_for(discovered.kind);
+        let fallback = CandidateDir {
+            path: discovered.path.clone(),
+            project_root: discovered.project_root.clone(),
+            kind: discovered.kind,
+            size_bytes: 0,
+            size_status: crate::model::SizeStatus::Incomplete,
+            git_status: crate::model::GitStatus::Unknown,
+            risk_level: descriptor.default_risk.clone(),
+            last_modified_epoch_secs: None,
+        };
         let fs_sem = fs_sem.clone();
         let config = ctx.config().clone();
         let ctx = ctx.clone();
-        handles.push(tokio::spawn(async move {
-            let project_root = discovered.project_root.clone();
-            let path = discovered.path.clone();
-            let kind = discovered.kind;
-            let descriptor = descriptor_for(kind);
-            let git_context =
-                resolve_git_context(&path).or_else(|| resolve_git_context(&project_root));
-            let git_status = classify_path_git_status(&path, git_context.as_ref(), &ctx).await;
-            let risk_level = descriptor.default_risk.clone();
+        let task_candidate = fallback.clone();
+        let handle = tokio::spawn(async move {
+            let git_context = resolve_git_context(&task_candidate.path)
+                .or_else(|| resolve_git_context(&task_candidate.project_root));
+            let git_status =
+                classify_path_git_status(&task_candidate.path, git_context.as_ref(), &ctx).await;
 
             let _permit = fs_sem
                 .acquire()
                 .await
                 .expect("semaphore must not be closed");
-            let size_path = path.clone();
-            let size_bytes = tokio::task::spawn_blocking(move || {
-                crate::scan::size::dir_size_bytes_sync_with_config(&size_path, &config)
+            let size_path = task_candidate.path.clone();
+            let measurement = tokio::task::spawn_blocking(move || {
+                crate::scan::size::measure_path_sync_with_config(&size_path, &config)
             })
             .await
-            .map_err(|err| err.to_string());
+            .unwrap_or_else(|_| crate::scan::size::SizeMeasurement::incomplete(0));
 
-            let candidate = size_bytes.map(|size_bytes| CandidateDir {
-                path,
-                project_root,
-                kind,
-                size_bytes,
+            CandidateDir {
+                size_bytes: measurement.bytes(),
+                size_status: measurement.status(),
                 git_status,
-                risk_level,
-                last_modified_epoch_secs: None,
-            });
-
-            (idx, candidate)
-        }));
+                ..task_candidate
+            }
+        });
+        handles.push((idx, fallback, handle));
     }
 
     let mut candidates_with_idx = Vec::new();
-    for handle in handles {
-        if let Ok((idx, Ok(candidate))) = handle.await {
-            candidates_with_idx.push((idx, candidate));
-        }
+    for (idx, fallback, handle) in handles {
+        let candidate = handle.await.unwrap_or(fallback);
+        candidates_with_idx.push((idx, candidate));
     }
     candidates_with_idx.sort_by_key(|(idx, _)| *idx);
     let candidates = candidates_with_idx

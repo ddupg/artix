@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use artix::delete::DeleteMode;
 use artix::delete_flow::{DeleteFlow, DeleteState};
-use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+use artix::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel, SizeStatus};
 
 #[test]
 fn cleanup_candidate_permanent_delete_runs_after_one_confirmation() {
@@ -113,6 +113,7 @@ fn entry(name: &str, git_status: GitStatus) -> BrowserEntry {
         name: name.to_string(),
         size_bytes: 1,
         reclaimable_bytes: 1,
+        size_status: SizeStatus::Complete,
         entry_kind: EntryKind::Directory,
         git_status,
         git_context: GitContext::default(),
