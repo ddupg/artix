@@ -70,6 +70,7 @@ Clean is handled asynchronously as a separate TUI state:
 - Idle `x` opens a clean confirmation only when the current directory has a detected project profile and a non-empty clean plan.
 - `y` confirms clean in the clean dialog; `Esc` cancels/dismisses.
 - Clean commands run with `cwd` set to the current directory/project root. Completion invalidates affected cache entries; success closes immediately, while failure remains visible until dismissed.
+- Clean planning detects `ProjectKind` once, then uses an exhaustive per-kind planning seam in `clean.rs`; marker checks are not duplicated in individual tool rules.
 
 ### Git/worktree context + Git status
 
