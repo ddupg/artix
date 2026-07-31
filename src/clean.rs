@@ -151,36 +151,39 @@ pub fn detect_project_profile(path: &Path) -> Result<Option<ProjectProfile>, Str
 }
 
 pub fn plan_clean(path: &Path) -> Result<CleanPlan, String> {
-    let mut commands = Vec::new();
-
-    if path.join("Cargo.toml").is_file() {
-        commands.push(command(ProjectKind::Rust, "cargo", ["clean"], path));
-    }
-
-    if path.join("pom.xml").is_file() {
-        if path.join("mvnw").is_file() {
-            commands.push(command(ProjectKind::Maven, "./mvnw", ["clean"], path));
-        } else {
-            commands.push(command(ProjectKind::Maven, "mvn", ["clean"], path));
-        }
-    }
-
-    if path.join("build.gradle").is_file() || path.join("build.gradle.kts").is_file() {
-        if path.join("gradlew").is_file() {
-            commands.push(command(ProjectKind::Gradle, "./gradlew", ["clean"], path));
-        } else {
-            commands.push(command(ProjectKind::Gradle, "gradle", ["clean"], path));
-        }
-    }
-
-    if let Some(command) = node_clean_command(path) {
-        commands.push(command);
-    }
+    let commands = detect_project_kinds(path)
+        .into_iter()
+        .filter_map(|kind| plan_clean_for_kind(kind, path))
+        .collect();
 
     Ok(CleanPlan {
         project_root: path.to_path_buf(),
         commands,
     })
+}
+
+fn plan_clean_for_kind(kind: ProjectKind, path: &Path) -> Option<CleanCommand> {
+    match kind {
+        ProjectKind::Rust => Some(command(kind, "cargo", ["clean"], path)),
+        ProjectKind::Maven => {
+            let program = if path.join("mvnw").is_file() {
+                "./mvnw"
+            } else {
+                "mvn"
+            };
+            Some(command(kind, program, ["clean"], path))
+        }
+        ProjectKind::Gradle => {
+            let program = if path.join("gradlew").is_file() {
+                "./gradlew"
+            } else {
+                "gradle"
+            };
+            Some(command(kind, program, ["clean"], path))
+        }
+        ProjectKind::Node => node_clean_command(path),
+        ProjectKind::Python => None,
+    }
 }
 
 pub async fn execute_clean_plan(plan: CleanPlan) -> CleanRunSummary {
@@ -269,10 +272,6 @@ fn detect_languages(path: &Path) -> Result<Vec<LanguageSummary>, String> {
 }
 
 fn node_clean_command(path: &Path) -> Option<CleanCommand> {
-    if !path.join("package.json").is_file() {
-        return None;
-    }
-
     let package = read_package_json(path).ok()?;
     if !package.scripts.contains_key("clean") {
         return None;
@@ -405,6 +404,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(commands, vec!["./mvnw clean", "./gradlew clean"]);
+    }
+
+    #[test]
+    fn duplicate_gradle_markers_plan_one_command() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("build.gradle"), "plugins {}\n").unwrap();
+        fs::write(dir.path().join("build.gradle.kts"), "plugins {}\n").unwrap();
+
+        let plan = plan_clean(dir.path()).unwrap();
+
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0].kind, ProjectKind::Gradle);
+        assert_eq!(plan.commands[0].display(), "gradle clean");
     }
 
     #[test]
