@@ -15,6 +15,27 @@ pub enum RiskLevel {
     Hidden,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeStatus {
+    #[default]
+    Complete,
+    Incomplete,
+}
+
+impl SizeStatus {
+    pub(crate) const fn combine(self, other: Self) -> Self {
+        if matches!(self, Self::Incomplete) || matches!(other, Self::Incomplete) {
+            Self::Incomplete
+        } else {
+            Self::Complete
+        }
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateKind {
     RustTarget,
@@ -65,6 +86,7 @@ pub struct BrowserEntry {
     pub name: String,
     pub size_bytes: u64,
     pub reclaimable_bytes: u64,
+    pub size_status: SizeStatus,
     pub entry_kind: EntryKind,
     pub git_status: GitStatus,
     pub git_context: GitContext,
@@ -78,6 +100,7 @@ impl BrowserEntry {
             name: "..".into(),
             size_bytes: 0,
             reclaimable_bytes: 0,
+            size_status: SizeStatus::Complete,
             entry_kind: EntryKind::Parent,
             git_status: GitStatus::Unknown,
             git_context: GitContext::default(),
@@ -92,6 +115,7 @@ pub struct CandidateDir {
     pub project_root: PathBuf,
     pub kind: CandidateKind,
     pub size_bytes: u64,
+    pub size_status: SizeStatus,
     pub git_status: GitStatus,
     pub risk_level: RiskLevel,
     pub last_modified_epoch_secs: Option<u64>,

@@ -197,7 +197,7 @@ impl<'a> BrowserListSnapshot<'a> {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel};
+    use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel, SizeStatus};
 
     use super::{BrowserList, FilterMode};
 
@@ -250,6 +250,7 @@ mod tests {
             name: name.to_string(),
             size_bytes: 0,
             reclaimable_bytes: 0,
+            size_status: SizeStatus::Complete,
             entry_kind: EntryKind::Directory,
             git_status,
             git_context: GitContext::default(),

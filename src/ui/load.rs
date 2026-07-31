@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::classify::git::resolve_git_context;
 use crate::clean::ProjectProfile;
-use crate::model::{BrowserEntry, EntryKind, GitContext};
+use crate::model::{BrowserEntry, EntryKind, GitContext, SizeStatus};
 use crate::scan::entry::{
     self as browser_entries, BrowserEntrySeed, apply_browser_entry_update,
     sort_browser_entries_by_size, sort_placeholder_entries,
@@ -186,11 +186,16 @@ impl DirectoryLoads {
                     .as_mut()
                     .expect("active load was checked")
                     .entries_finished = true;
-                self.snapshots
+                let snapshot = self
+                    .snapshots
                     .get_mut(&active_dir)
-                    .expect("active load owns a snapshot")
-                    .loading_paths
-                    .clear();
+                    .expect("active load owns a snapshot");
+                for entry in &mut snapshot.entries {
+                    if snapshot.loading_paths.contains(&entry.path) {
+                        entry.size_status = SizeStatus::Incomplete;
+                    }
+                }
+                snapshot.loading_paths.clear();
             }
             DirectoryLoadEvent::ProfileFinished { result, .. } => {
                 if profile_finished {
@@ -362,7 +367,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::model::{CandidateKind, EntryKind, GitStatus};
+    use crate::model::{CandidateKind, EntryKind, GitStatus, SizeStatus};
 
     use super::{DirectoryLoadEvent, DirectoryLoads, LoadToken, WorkerCommand};
 
@@ -423,6 +428,13 @@ mod tests {
             token,
             dir: temp.path().to_path_buf(),
         }));
+        assert!(
+            loads
+                .entries(temp.path())
+                .expect("entries")
+                .iter()
+                .all(|entry| entry.size_status == SizeStatus::Incomplete)
+        );
         assert!(!loads.is_complete(temp.path()));
         assert!(loads.apply(DirectoryLoadEvent::ProfileFinished {
             token,

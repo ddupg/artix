@@ -28,8 +28,8 @@ The library exposes these top-level modules (see `src/lib.rs`):
 
 Important types (see `src/model.rs`):
 
-- `BrowserEntry`: The UI list item (dir or cleanup candidate) with size, Git status, and context.
-- `CandidateDir`: A discovered “cleanup candidate” directory with owner project root, typed candidate kind, size, Git status, and risk level.
+- `BrowserEntry`: The UI list item (dir or cleanup candidate) with size, size completeness, Git status, and context.
+- `CandidateDir`: A discovered “cleanup candidate” directory with owner project root, typed candidate kind, size, size completeness, Git status, and risk level.
 - `Project`: Aggregated per-project totals (name, reclaimable bytes, candidate count).
 - `GitContext`: Repo/worktree roots plus branch/head metadata.
 - `ProjectProfile` / `CleanPlan`: Current TUI directory project metadata and the clean commands available for that exact directory.
@@ -40,7 +40,7 @@ Important types (see `src/model.rs`):
 
 1. **Discover the workspace once**: `scan::discovery` walks the provided roots once to collect project markers and classify directories through the typed candidate catalog (see `src/scan/discovery.rs` and `src/candidate.rs`). Candidate directories and `.git` metadata are traversal boundaries, symlinked directories are not followed, overlapping roots are deduplicated, and each candidate is assigned to its nearest marker root (or nearest CLI root).
 2. **Enrich candidates** (async, concurrency-limited):
-   - Compute `size_bytes`.
+   - Compute `size_bytes` plus `size_status`; traversal or task failures preserve partial bytes and mark the measurement incomplete.
    - Classify `git_status` and `risk_level`.
 3. **Summarize projects**: aggregate candidates into `Project` rows for printing.
 
@@ -57,7 +57,7 @@ The TUI loop lives in `ui::run_tui` / `run_app` (see `src/ui/mod.rs`). A `Browse
 Directory loading is intentionally two-phase (see `BrowserApp::load_directory` and the background `BgRequest::LoadDirectory` worker in `src/ui/mod.rs`):
 
 - **Quick placeholder listing**: returns entries with `size_bytes = 0` and `git_status = Unknown` so the UI becomes usable immediately.
-- **Progressive enrichment**: per-entry tasks compute size + Git status and send `EntryUpdated` messages; the UI applies updates, resorts, and preserves the selected entry.
+- **Progressive enrichment**: per-entry tasks compute size + completeness + Git status and send `EntryUpdated` messages; the UI applies updates, resorts, and preserves the selected entry. If an enrichment task ends without an update, its placeholder becomes an incomplete measurement instead of silently looking like a real zero.
 - **Project profile enrichment**: the current directory itself is checked for project markers (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle(.kts)`, `pyproject.toml`) and language summary/clean plan metadata is streamed back separately. This does not walk upward to find a parent project and does not recursively clean child projects.
 
 Deletion is also handled asynchronously:

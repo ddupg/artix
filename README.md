@@ -187,6 +187,9 @@ mode = "plain"
 <project_name>\t<reclaimable_bytes>\t<candidate_count>
 ```
 
+如果有目录只能完成部分体积统计，stdout 仍保持上述三列格式，具体路径会作为
+`incomplete size measurement` 警告写到 stderr。TUI 中这类估算值以 `~` 前缀显示。
+
 ### 4. 主要按键
 
 - `j` / `k` 或上下键：移动选择
