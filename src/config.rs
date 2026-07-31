@@ -4,43 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use directories::BaseDirs;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 const CONFIG_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawConfigFile {
-    version: Option<u32>,
-    ui: RawUiConfig,
-    performance: RawPerformanceConfig,
-    delete: RawDeleteConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawUiConfig {
-    mode: Option<UiMode>,
-    icons: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawPerformanceConfig {
-    fs_concurrency: Option<usize>,
-    git_concurrency: Option<usize>,
-    tui_entry_concurrency: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawDeleteConfig {
-    trash_backend: Option<TrashBackend>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UiMode {
     #[default]
@@ -49,7 +19,7 @@ pub enum UiMode {
     Tui,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrashBackend {
     #[default]
@@ -57,41 +27,33 @@ pub enum TrashBackend {
     Builtin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     pub mode: UiMode,
     pub icons: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PerformanceConfig {
     pub fs_concurrency: usize,
     pub git_concurrency: usize,
     pub tui_entry_concurrency: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SizeTraversalOptions {
-    pub follow_symlinks: bool,
-    pub dedup_dir_inodes: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScanConfig {
-    pub size_traversal: SizeTraversalOptions,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DeleteConfig {
     pub trash_backend: TrashBackend,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
     pub ui: UiConfig,
     pub performance: PerformanceConfig,
-    pub scan: ScanConfig,
     pub delete: DeleteConfig,
 }
 
@@ -119,24 +81,36 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
-            ui: UiConfig {
-                mode: UiMode::Auto,
-                icons: true,
-            },
-            performance: PerformanceConfig {
-                fs_concurrency: default_fs_concurrency(),
-                git_concurrency: default_git_concurrency(),
-                tui_entry_concurrency: default_tui_entry_concurrency(),
-            },
-            scan: ScanConfig {
-                size_traversal: SizeTraversalOptions {
-                    follow_symlinks: false,
-                    dedup_dir_inodes: true,
-                },
-            },
-            delete: DeleteConfig {
-                trash_backend: TrashBackend::Auto,
-            },
+            ui: UiConfig::default(),
+            performance: PerformanceConfig::default(),
+            delete: DeleteConfig::default(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            mode: UiMode::Auto,
+            icons: true,
+        }
+    }
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            fs_concurrency: default_fs_concurrency(),
+            git_concurrency: default_git_concurrency(),
+            tui_entry_concurrency: default_tui_entry_concurrency(),
+        }
+    }
+}
+
+impl Default for DeleteConfig {
+    fn default() -> Self {
+        Self {
+            trash_backend: TrashBackend::Auto,
         }
     }
 }
@@ -149,46 +123,31 @@ impl Default for AppContext {
 
 impl Config {
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
-        let raw: RawConfigFile = toml::from_str(contents).map_err(|err| err.to_string())?;
-        Self::from_raw(raw)
+        let config: Self = toml::from_str(contents).map_err(|err| err.to_string())?;
+        config.validate()
     }
 
-    fn from_raw(raw: RawConfigFile) -> Result<Self, String> {
-        let mut config = Self::default();
-
-        let version = raw.version.unwrap_or(CONFIG_VERSION);
-        if version != CONFIG_VERSION {
+    fn validate(self) -> Result<Self, String> {
+        if self.version != CONFIG_VERSION {
             return Err(format!(
-                "unsupported config version {version}; expected {CONFIG_VERSION}"
+                "unsupported config version {}; expected {CONFIG_VERSION}",
+                self.version
             ));
         }
-        config.version = version;
-
-        config.ui.mode = raw.ui.mode.unwrap_or(config.ui.mode);
-        config.ui.icons = raw.ui.icons.unwrap_or(config.ui.icons);
-
-        config.performance.fs_concurrency = resolve_positive_usize(
+        validate_positive_usize(
             "performance.fs_concurrency",
-            raw.performance.fs_concurrency,
-            config.performance.fs_concurrency,
+            self.performance.fs_concurrency,
         )?;
-        config.performance.git_concurrency = resolve_positive_usize(
+        validate_positive_usize(
             "performance.git_concurrency",
-            raw.performance.git_concurrency,
-            config.performance.git_concurrency,
+            self.performance.git_concurrency,
         )?;
-        config.performance.tui_entry_concurrency = resolve_positive_usize(
+        validate_positive_usize(
             "performance.tui_entry_concurrency",
-            raw.performance.tui_entry_concurrency,
-            config.performance.tui_entry_concurrency,
+            self.performance.tui_entry_concurrency,
         )?;
 
-        config.delete.trash_backend = raw
-            .delete
-            .trash_backend
-            .unwrap_or(config.delete.trash_backend);
-
-        Ok(config)
+        Ok(self)
     }
 }
 
@@ -199,18 +158,7 @@ pub fn default_config_path() -> Result<PathBuf, String> {
 }
 
 pub fn render_default_config_toml() -> String {
-    let config = Config::default();
-
-    format!(
-        "version = {}\n\n[ui]\nmode = \"{}\"   # auto | plain | tui\nicons = {}\n\n[performance]\nfs_concurrency = {}\ngit_concurrency = {}\ntui_entry_concurrency = {}\n\n[delete]\ntrash_backend = \"{}\"  # auto | builtin\n",
-        config.version,
-        config.ui.mode.as_toml_value(),
-        config.ui.icons,
-        config.performance.fs_concurrency,
-        config.performance.git_concurrency,
-        config.performance.tui_entry_concurrency,
-        config.delete.trash_backend.as_toml_value(),
-    )
+    toml::to_string_pretty(&Config::default()).expect("default config must serialize")
 }
 
 pub fn init_default_config_file() -> Result<PathBuf, String> {
@@ -241,30 +189,11 @@ impl AppContext {
     }
 }
 
-impl UiMode {
-    fn as_toml_value(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Plain => "plain",
-            Self::Tui => "tui",
-        }
-    }
-}
-
-impl TrashBackend {
-    fn as_toml_value(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Builtin => "builtin",
-        }
-    }
-}
-
 pub fn load_config() -> Result<ConfigLoadReport, String> {
     let mut warnings = Vec::new();
     let existing = discover_existing_config_path();
 
-    let raw = match &existing {
+    let config = match &existing {
         Some((path, kind)) => {
             let contents = fs::read_to_string(path)
                 .map_err(|err| format!("failed to read config file {}: {err}", path.display()))?;
@@ -277,13 +206,12 @@ pub fn load_config() -> Result<ConfigLoadReport, String> {
                         .unwrap_or_else(|_| "~/.config/artix/config.toml".to_string())
                 ));
             }
-            toml::from_str::<RawConfigFile>(&contents)
-                .map_err(|err| format!("failed to parse config file {}: {err}", path.display()))?
+            let config = toml::from_str::<Config>(&contents)
+                .map_err(|err| format!("failed to parse config file {}: {err}", path.display()))?;
+            config.validate()?
         }
-        None => RawConfigFile::default(),
+        None => Config::default(),
     };
-
-    let config = Config::from_raw(raw)?;
 
     Ok(ConfigLoadReport {
         config,
@@ -292,15 +220,11 @@ pub fn load_config() -> Result<ConfigLoadReport, String> {
     })
 }
 
-fn resolve_positive_usize(
-    field: &str,
-    value: Option<usize>,
-    default: usize,
-) -> Result<usize, String> {
-    match value {
-        Some(0) => Err(format!("{field} must be greater than 0")),
-        Some(value) => Ok(value),
-        None => Ok(default),
+fn validate_positive_usize(field: &str, value: usize) -> Result<(), String> {
+    if value == 0 {
+        Err(format!("{field} must be greater than 0"))
+    } else {
+        Ok(())
     }
 }
 
@@ -439,6 +363,34 @@ trash_backend = "builtin"
     }
 
     #[test]
+    fn partial_nested_sections_inherit_runtime_defaults() {
+        let defaults = Config::default();
+        let config = Config::from_toml_str(
+            r#"
+[ui]
+mode = "plain"
+
+[performance]
+git_concurrency = 3
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ui.mode, UiMode::Plain);
+        assert_eq!(config.ui.icons, defaults.ui.icons);
+        assert_eq!(
+            config.performance.fs_concurrency,
+            defaults.performance.fs_concurrency
+        );
+        assert_eq!(config.performance.git_concurrency, 3);
+        assert_eq!(
+            config.performance.tui_entry_concurrency,
+            defaults.performance.tui_entry_concurrency
+        );
+        assert_eq!(config.delete, defaults.delete);
+    }
+
+    #[test]
     fn config_from_toml_rejects_removed_tui_size_budget() {
         let err = Config::from_toml_str(
             r#"
@@ -453,24 +405,39 @@ timeout_ms = 50
     }
 
     #[test]
-    fn config_from_toml_rejects_zero_concurrency() {
-        let err = Config::from_toml_str(
-            r#"
-[performance]
-fs_concurrency = 0
-"#,
-        )
-        .unwrap_err();
+    fn config_from_toml_rejects_unsupported_version() {
+        let err = Config::from_toml_str("version = 2\n").unwrap_err();
 
-        assert_eq!(err, "performance.fs_concurrency must be greater than 0");
+        assert_eq!(err, "unsupported config version 2; expected 1");
+    }
+
+    #[test]
+    fn config_from_toml_rejects_zero_concurrency() {
+        for field in ["fs_concurrency", "git_concurrency", "tui_entry_concurrency"] {
+            let contents = format!(
+                r#"
+[performance]
+{field} = 0
+"#
+            );
+            let err = Config::from_toml_str(&contents).unwrap_err();
+
+            assert_eq!(err, format!("performance.{field} must be greater than 0"));
+        }
     }
 
     #[test]
     fn render_default_config_round_trips_through_parser() {
         let rendered = render_default_config_toml();
         let parsed = Config::from_toml_str(&rendered).unwrap();
+        let rendered_value: toml::Value = toml::from_str(&rendered).unwrap();
+        let rendered_table = rendered_value.as_table().expect("top-level table");
 
         assert_eq!(parsed, Config::default());
+        assert_eq!(rendered_table.len(), 4);
+        for field in ["version", "ui", "performance", "delete"] {
+            assert!(rendered_table.contains_key(field));
+        }
     }
 
     #[test]
