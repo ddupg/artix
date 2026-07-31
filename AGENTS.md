@@ -131,7 +131,9 @@ Clean command execution also depends on tools from PATH or local wrappers (`carg
 
 ## 6) Configuration
 
-Configuration is primarily through `config.toml` loaded by `src/config.rs`.
+Configuration is primarily through `config.toml` loaded by `src/config.rs`. The runtime `Config`
+types are the serde schema and the source for defaults, validation, and rendered default TOML;
+there is no parallel raw-schema model.
 
 - **Default config path:** `~/.config/artix/config.toml`.
 - **Compatibility lookup order:** `~/.config/artix/config.toml`, then `~/.artix/config.toml`.

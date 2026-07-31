@@ -81,7 +81,6 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
             last_modified_epoch_secs: None,
         };
         let fs_sem = fs_sem.clone();
-        let config = ctx.config().clone();
         let ctx = ctx.clone();
         let task_candidate = fallback.clone();
         let handle = tokio::spawn(async move {
@@ -96,7 +95,7 @@ pub async fn scan_workspace_with_context(roots: &[PathBuf], ctx: &AppContext) ->
                 .expect("semaphore must not be closed");
             let size_path = task_candidate.path.clone();
             let measurement = tokio::task::spawn_blocking(move || {
-                crate::scan::size::measure_path_sync_with_config(&size_path, &config)
+                crate::scan::size::measure_path_sync(&size_path)
             })
             .await
             .unwrap_or_else(|_| crate::scan::size::SizeMeasurement::incomplete(0));

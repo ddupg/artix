@@ -2,8 +2,19 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::{AppContext, Config, SizeTraversalOptions};
+use crate::config::AppContext;
 use crate::model::SizeStatus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SizeTraversalOptions {
+    follow_symlinks: bool,
+    dedup_dir_inodes: bool,
+}
+
+const DEFAULT_TRAVERSAL: SizeTraversalOptions = SizeTraversalOptions {
+    follow_symlinks: false,
+    dedup_dir_inodes: true,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeMeasurement {
@@ -154,16 +165,15 @@ fn measure_path(path: &Path, traversal: SizeTraversalOptions) -> SizeMeasurement
     dir_size_bytes_sync_inner(path, traversal, &mut visited_dirs)
 }
 
-pub(crate) fn measure_path_sync_with_config(path: &Path, config: &Config) -> SizeMeasurement {
-    measure_path(path, config.scan.size_traversal)
+pub(crate) fn measure_path_sync(path: &Path) -> SizeMeasurement {
+    measure_path(path, DEFAULT_TRAVERSAL)
 }
 
 pub async fn measure_size(path: &Path, ctx: &AppContext) -> SizeMeasurement {
     let sem = ctx.fs_semaphore();
     let _permit = sem.acquire().await.expect("semaphore must not be closed");
     let path = path.to_path_buf();
-    let config = ctx.config().clone();
-    tokio::task::spawn_blocking(move || measure_path_sync_with_config(&path, &config))
+    tokio::task::spawn_blocking(move || measure_path_sync(&path))
         .await
         .unwrap_or_else(|_| SizeMeasurement::incomplete(0))
 }
@@ -174,14 +184,8 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{SizeMeasurement, measure_path};
-    use crate::config::SizeTraversalOptions;
+    use super::{DEFAULT_TRAVERSAL, SizeMeasurement, SizeTraversalOptions, measure_path};
     use crate::model::SizeStatus;
-
-    const DEFAULT_TRAVERSAL: SizeTraversalOptions = SizeTraversalOptions {
-        follow_symlinks: false,
-        dedup_dir_inodes: true,
-    };
 
     #[test]
     fn missing_path_is_an_incomplete_zero_measurement() {
