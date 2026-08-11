@@ -57,6 +57,9 @@ pub fn icon_for_entry(entry: &BrowserEntry) -> &'static str {
     if matches!(entry.entry_kind, EntryKind::File) {
         return nerd::FILE;
     }
+    if matches!(entry.entry_kind, EntryKind::GitStorage) {
+        return nerd::GIT;
+    }
     if let Some(kind) = entry.entry_kind.candidate_kind() {
         return icon_by_candidate_kind(kind);
     }
@@ -152,7 +155,10 @@ pub fn name_style(entry: &BrowserEntry, is_selected: bool) -> Style {
     }
     let color = name_color(entry);
     let mut style = Style::default().fg(color);
-    if matches!(entry.entry_kind, EntryKind::CleanupCandidate(_)) {
+    if matches!(
+        entry.entry_kind,
+        EntryKind::CleanupCandidate(_) | EntryKind::GitStorage
+    ) {
         style = style.add_modifier(Modifier::BOLD);
     }
     style
@@ -164,6 +170,9 @@ fn name_color(entry: &BrowserEntry) -> Color {
     }
     if matches!(entry.entry_kind, EntryKind::File) {
         return colors::FILE;
+    }
+    if matches!(entry.entry_kind, EntryKind::GitStorage) {
+        return colors::BRANCH;
     }
 
     // Candidate kinds get language-specific colors

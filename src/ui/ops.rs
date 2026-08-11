@@ -3,6 +3,7 @@ pub(super) struct OperationTracker {
     next_request_id: u64,
     pending_delete_id: Option<u64>,
     pending_clean_id: Option<u64>,
+    pending_git_gc_id: Option<u64>,
 }
 
 impl OperationTracker {
@@ -11,6 +12,7 @@ impl OperationTracker {
             next_request_id: 1,
             pending_delete_id: None,
             pending_clean_id: None,
+            pending_git_gc_id: None,
         }
     }
 
@@ -41,6 +43,21 @@ impl OperationTracker {
         }
 
         self.pending_clean_id = None;
+        true
+    }
+
+    pub(super) fn start_git_gc(&mut self) -> u64 {
+        let request_id = self.allocate_request_id();
+        self.pending_git_gc_id = Some(request_id);
+        request_id
+    }
+
+    pub(super) fn finish_git_gc(&mut self, request_id: u64) -> bool {
+        if self.pending_git_gc_id != Some(request_id) {
+            return false;
+        }
+
+        self.pending_git_gc_id = None;
         true
     }
 
@@ -75,5 +92,16 @@ mod tests {
         assert!(!ops.finish_clean(request_id + 1));
         assert!(ops.finish_clean(request_id));
         assert!(!ops.finish_clean(request_id));
+    }
+
+    #[test]
+    fn finish_git_gc_only_clears_the_matching_request() {
+        let mut ops = OperationTracker::new();
+
+        let request_id = ops.start_git_gc();
+
+        assert!(!ops.finish_git_gc(request_id + 1));
+        assert!(ops.finish_git_gc(request_id));
+        assert!(!ops.finish_git_gc(request_id));
     }
 }

@@ -31,6 +31,15 @@
 - 列表中如果某一项本身是 repo root 或 worktree root，也会显示分支
 - 支持解析 `git worktree` 使用的 `.git` 文件形式，不只认 `.git/` 目录
 
+### Git 存储维护
+
+- 仓库根目录始终显示一个只读的 `Git storage` 条目；多个 worktree 按共享的 `common_dir` 识别同一份存储
+- 后台使用 `git count-objects -v` 展示 `.git` 总占用、pack、loose objects、garbage 和 prune-packable objects
+- Git LFS 占用单独展示，但不纳入普通 Git GC
+- 选中 `Git storage` 后按 `x`，确认后执行保守的 `git gc`
+- 不使用 `--prune=now`、`--aggressive` 或 `--force`，也不会直接删除 `.git` 下的文件或 refs
+- Git 分析失败时显示错误并禁用 GC；GC 完成后重新分析实际占用
+
 ### Git-aware 过滤
 
 支持 4 种过滤模式：
@@ -200,8 +209,8 @@ mode = "plain"
 - `f`：切换过滤模式
 - `d`：打开删除确认
 - `t`：在删除确认框中移动到废纸篓
-- `y`：在删除确认框中永久删除，或在 clean 确认框中执行 clean
-- `x`：当前目录是可 clean 项目根时，打开 clean 确认
+- `y`：在删除确认框中永久删除，或在 clean / Git GC 确认框中执行操作
+- `x`：选中 `Git storage` 时打开 Git GC 确认；否则对当前可 clean 项目打开 clean 确认
 - `Esc`：关闭弹窗
 - `q`：退出
 
@@ -219,6 +228,8 @@ mode = "plain"
   删除状态机和删除动作执行。
 - [src/classify/git.rs](/Users/bytedance/opensource/artix/src/classify/git.rs)
   Git/worktree 上下文解析，以及目录的 Git 状态分类。
+- [src/git_storage.rs](/Users/bytedance/opensource/artix/src/git_storage.rs)
+  Git 存储分析、`git count-objects` 解析和保守 `git gc` 执行。
 - [src/scan/mod.rs](/Users/bytedance/opensource/artix/src/scan/mod.rs)
   扫描、项目汇总，以及目录浏览条目生成。
 - [src/scan/size.rs](/Users/bytedance/opensource/artix/src/scan/size.rs)

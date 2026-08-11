@@ -33,6 +33,9 @@ impl FilterMode {
         if matches!(entry.entry_kind, EntryKind::Parent) {
             return true;
         }
+        if matches!(entry.entry_kind, EntryKind::GitStorage) {
+            return matches!(self, Self::All | Self::CleanupFocus);
+        }
 
         match self {
             Self::All => true,
