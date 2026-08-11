@@ -5,6 +5,8 @@ pub mod clean_flow;
 pub mod config;
 pub mod delete;
 pub mod delete_flow;
+pub mod git_storage;
+pub mod git_storage_flow;
 pub mod model;
 pub mod project;
 pub mod scan;

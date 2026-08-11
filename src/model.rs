@@ -69,13 +69,14 @@ pub enum EntryKind {
     File,
     Directory,
     CleanupCandidate(CandidateKind),
+    GitStorage,
 }
 
 impl EntryKind {
     pub const fn candidate_kind(self) -> Option<CandidateKind> {
         match self {
             Self::CleanupCandidate(kind) => Some(kind),
-            Self::Parent | Self::File | Self::Directory => None,
+            Self::Parent | Self::File | Self::Directory | Self::GitStorage => None,
         }
     }
 }

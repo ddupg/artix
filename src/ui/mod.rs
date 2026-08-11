@@ -3,7 +3,7 @@ mod load;
 mod ops;
 mod theme;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,6 +26,10 @@ use crate::clean_flow::{CleanFlow, CleanRequest};
 use crate::config::AppContext;
 use crate::delete::DeleteMode;
 use crate::delete_flow::{DeleteFlow, DeleteRequest, execute_delete_with_config};
+use crate::git_storage::{
+    GitGcResult, GitStorageAnalysis, GitStorageTarget, analyze_git_storage, execute_git_gc,
+};
+use crate::git_storage_flow::{GitStorageFlow, GitStorageRequest};
 use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, Project};
 use browser_list::{BrowserList, BrowserListSnapshot};
 use load::{DirectoryLoadEvent, DirectoryLoads, WorkerCommand};
@@ -35,6 +39,7 @@ use tokio::task::JoinSet;
 
 pub use crate::clean_flow::CleanState;
 pub use crate::delete_flow::DeleteState;
+pub use crate::git_storage_flow::GitStorageState;
 pub use browser_list::FilterMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +57,8 @@ pub struct AppState {
     browser_list: BrowserList,
     delete_flow: DeleteFlow,
     clean_flow: CleanFlow,
+    git_storage: Option<GitStorageView>,
+    git_storage_flow: GitStorageFlow,
 }
 
 impl AppState {
@@ -63,6 +70,8 @@ impl AppState {
             browser_list: BrowserList::new(entries),
             delete_flow: DeleteFlow::default(),
             clean_flow: CleanFlow::default(),
+            git_storage: None,
+            git_storage_flow: GitStorageFlow::default(),
         }
     }
 
@@ -148,12 +157,17 @@ impl AppState {
     }
 
     pub fn request_delete_for_selected(&mut self) {
-        if !matches!(self.clean_flow.state(), CleanState::Idle) {
+        if !matches!(self.clean_flow.state(), CleanState::Idle)
+            || !matches!(self.git_storage_flow.state(), GitStorageState::Idle)
+        {
             return;
         }
         let Some(entry) = self.selected_entry() else {
             return;
         };
+        if matches!(entry.entry_kind, EntryKind::GitStorage) {
+            return;
+        }
         self.delete_flow.request(entry);
     }
 
@@ -165,6 +179,10 @@ impl AppState {
         self.clean_flow.state()
     }
 
+    pub fn git_storage_state(&self) -> &GitStorageState {
+        self.git_storage_flow.state()
+    }
+
     pub fn can_clean_current_dir(&self) -> bool {
         self.current_project_profile
             .as_ref()
@@ -174,7 +192,17 @@ impl AppState {
     pub fn request_clean_current_dir(&mut self) {
         if !matches!(self.delete_flow.state(), DeleteState::Idle)
             || !matches!(self.clean_flow.state(), CleanState::Idle)
+            || !matches!(self.git_storage_flow.state(), GitStorageState::Idle)
         {
+            return;
+        }
+        if self
+            .selected_entry_ref()
+            .is_some_and(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
+        {
+            if let Some(GitStorageView::Available(analysis)) = &self.git_storage {
+                self.git_storage_flow.request(analysis.clone());
+            }
             return;
         }
         let Some(profile) = &self.current_project_profile else {
@@ -189,6 +217,14 @@ impl AppState {
 
     pub fn finish_clean(&mut self, summary: CleanRunSummary) -> Option<PathBuf> {
         self.clean_flow.finish(summary)
+    }
+
+    fn confirm_git_gc(&mut self) -> Option<GitStorageRequest> {
+        self.git_storage_flow.confirm()
+    }
+
+    fn finish_git_gc(&mut self, result: GitGcResult) -> Option<GitStorageTarget> {
+        self.git_storage_flow.finish(result)
     }
 
     fn choose_trash_delete(&mut self) -> Option<DeleteRequest> {
@@ -206,6 +242,7 @@ impl AppState {
     pub fn clear_transient_state(&mut self) {
         self.delete_flow.cancel();
         self.clean_flow.cancel();
+        self.git_storage_flow.cancel();
     }
 
     fn selected_entry_ref(&self) -> Option<&BrowserEntry> {
@@ -224,7 +261,73 @@ impl AppState {
         self.current_git_context = resolve_git_context(&current_dir).unwrap_or_default();
         self.current_project_profile = None;
         self.clean_flow.cancel();
+        self.git_storage = None;
+        self.git_storage_flow.cancel();
         self.current_dir = current_dir;
+    }
+
+    fn set_git_storage(&mut self, view: Option<GitStorageView>) {
+        self.git_storage = view;
+    }
+
+    fn git_storage_analysis(&self) -> Option<&GitStorageAnalysis> {
+        match &self.git_storage {
+            Some(GitStorageView::Available(analysis)) => Some(analysis),
+            Some(GitStorageView::Pending(_)) | Some(GitStorageView::Unavailable { .. }) | None => {
+                None
+            }
+        }
+    }
+
+    fn git_storage_error(&self) -> Option<&str> {
+        match &self.git_storage {
+            Some(GitStorageView::Unavailable { message, .. }) => Some(message),
+            _ => None,
+        }
+    }
+
+    fn git_storage_is_loading(&self) -> bool {
+        matches!(self.git_storage, Some(GitStorageView::Pending(_)))
+    }
+
+    fn can_gc_selected(&self) -> bool {
+        self.selected_entry_ref()
+            .is_some_and(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
+            && self.git_storage_analysis().is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitStorageView {
+    Pending(GitStorageTarget),
+    Available(GitStorageAnalysis),
+    Unavailable {
+        target: GitStorageTarget,
+        message: String,
+    },
+}
+
+impl GitStorageView {
+    fn entry(&self) -> BrowserEntry {
+        match self {
+            Self::Pending(target) | Self::Unavailable { target, .. } => target.placeholder_entry(),
+            Self::Available(analysis) => analysis.browser_entry(),
+        }
+    }
+
+    fn retarget(&self, target: GitStorageTarget) -> Self {
+        match self {
+            Self::Pending(_) => Self::Pending(target),
+            Self::Available(analysis) => {
+                let mut analysis = analysis.clone();
+                analysis.target = target;
+                Self::Available(analysis)
+            }
+            Self::Unavailable { message, .. } => Self::Unavailable {
+                target,
+                message: message.clone(),
+            },
+        }
     }
 }
 
@@ -310,6 +413,8 @@ struct BrowserApp {
     loads: DirectoryLoads,
     icon_mode: theme::IconMode,
     ops: ops::OperationTracker,
+    git_storage_cache: HashMap<PathBuf, GitStorageCacheEntry>,
+    next_git_storage_request_id: u64,
 
     bg_tx: mpsc::UnboundedSender<BgRequest>,
     bg_rx: mpsc::UnboundedReceiver<BgResponse>,
@@ -330,6 +435,14 @@ enum BgRequest {
         request_id: u64,
         plan: CleanPlan,
     },
+    AnalyzeGitStorage {
+        request_id: u64,
+        target: GitStorageTarget,
+    },
+    GitGc {
+        request_id: u64,
+        target: GitStorageTarget,
+    },
 }
 
 #[derive(Debug)]
@@ -344,6 +457,21 @@ enum BgResponse {
         request_id: u64,
         summary: CleanRunSummary,
     },
+    GitStorageAnalyzed {
+        request_id: u64,
+        target: GitStorageTarget,
+        result: Box<Result<GitStorageAnalysis, String>>,
+    },
+    GitGcFinished {
+        request_id: u64,
+        result: GitGcResult,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct GitStorageCacheEntry {
+    request_id: u64,
+    view: GitStorageView,
 }
 
 impl BrowserApp {
@@ -469,6 +597,27 @@ impl BrowserApp {
                             });
                         });
                     }
+                    BgRequest::AnalyzeGitStorage { request_id, target } => {
+                        let bg_resp_tx = bg_resp_tx.clone();
+                        let ctx = bg_ctx.clone();
+                        tokio::spawn(async move {
+                            let result = analyze_git_storage(target.clone(), &ctx).await;
+                            let _ = bg_resp_tx.send(BgResponse::GitStorageAnalyzed {
+                                request_id,
+                                target,
+                                result: Box::new(result),
+                            });
+                        });
+                    }
+                    BgRequest::GitGc { request_id, target } => {
+                        let bg_resp_tx = bg_resp_tx.clone();
+                        let ctx = bg_ctx.clone();
+                        tokio::spawn(async move {
+                            let result = execute_git_gc(target, &ctx).await;
+                            let _ =
+                                bg_resp_tx.send(BgResponse::GitGcFinished { request_id, result });
+                        });
+                    }
                 }
             }
         });
@@ -479,6 +628,8 @@ impl BrowserApp {
             loads: DirectoryLoads::new(),
             icon_mode,
             ops: ops::OperationTracker::new(),
+            git_storage_cache: HashMap::new(),
+            next_git_storage_request_id: 1,
 
             bg_tx,
             bg_rx,
@@ -528,6 +679,36 @@ impl BrowserApp {
                     let current = self.state.current_dir().to_path_buf();
                     self.load_directory(current);
                 }
+                BgResponse::GitStorageAnalyzed {
+                    request_id,
+                    target,
+                    result,
+                } => {
+                    let Some(cached) = self.git_storage_cache.get_mut(&target.common_dir) else {
+                        continue;
+                    };
+                    if cached.request_id != request_id {
+                        continue;
+                    }
+                    cached.view = match *result {
+                        Ok(analysis) => GitStorageView::Available(analysis),
+                        Err(message) => GitStorageView::Unavailable { target, message },
+                    };
+                    let current = self.state.current_dir().to_path_buf();
+                    self.sync_directory_view(&current);
+                }
+                BgResponse::GitGcFinished { request_id, result } => {
+                    if !self.ops.finish_git_gc(request_id) {
+                        continue;
+                    }
+                    let Some(target) = self.state.finish_git_gc(result) else {
+                        continue;
+                    };
+                    self.git_storage_cache.remove(&target.common_dir);
+                    let current = self.state.current_dir().to_path_buf();
+                    self.loads.invalidate_related(&current);
+                    self.load_directory(current);
+                }
             }
         }
     }
@@ -536,7 +717,7 @@ impl BrowserApp {
         let Some(entry) = self.state.selected_entry() else {
             return Ok(());
         };
-        if matches!(entry.entry_kind, EntryKind::File) {
+        if matches!(entry.entry_kind, EntryKind::File | EntryKind::GitStorage) {
             return Ok(());
         }
         self.load_directory(entry.path);
@@ -557,6 +738,7 @@ impl BrowserApp {
 
     fn load_directory(&mut self, dir: PathBuf) {
         let command = self.loads.open(dir.clone(), &self.root_dir);
+        self.ensure_git_storage_analysis(&dir);
         self.sync_directory_view(&dir);
         let request = match command {
             WorkerCommand::Start(request) => BgRequest::LoadDirectory(request),
@@ -566,14 +748,51 @@ impl BrowserApp {
     }
 
     fn sync_directory_view(&mut self, dir: &Path) {
-        let entries = self.loads.entries(dir).unwrap_or_default().to_vec();
+        let mut entries = self.loads.entries(dir).unwrap_or_default().to_vec();
+        let git_storage = self.git_storage_view_for(dir);
+        if let Some(view) = &git_storage {
+            entries.push(view.entry());
+            crate::scan::entry::sort_browser_entries_by_size(&mut entries);
+        }
         if self.state.current_dir() == dir {
             self.state.refresh_entries(entries);
         } else {
             self.state.replace_entries(dir.to_path_buf(), entries);
         }
+        self.state.set_git_storage(git_storage);
         self.state
             .set_current_project_profile(self.loads.profile(dir).cloned());
+    }
+
+    fn ensure_git_storage_analysis(&mut self, dir: &Path) {
+        let context = resolve_git_context(dir).unwrap_or_default();
+        let Some(target) = GitStorageTarget::for_repo_root(dir, &context) else {
+            return;
+        };
+        if self.git_storage_cache.contains_key(&target.common_dir) {
+            return;
+        }
+
+        let request_id = self.next_git_storage_request_id;
+        self.next_git_storage_request_id = self.next_git_storage_request_id.saturating_add(1);
+        self.git_storage_cache.insert(
+            target.common_dir.clone(),
+            GitStorageCacheEntry {
+                request_id,
+                view: GitStorageView::Pending(target.clone()),
+            },
+        );
+        let _ = self
+            .bg_tx
+            .send(BgRequest::AnalyzeGitStorage { request_id, target });
+    }
+
+    fn git_storage_view_for(&self, dir: &Path) -> Option<GitStorageView> {
+        let context = resolve_git_context(dir)?;
+        let target = GitStorageTarget::for_repo_root(dir, &context)?;
+        self.git_storage_cache
+            .get(&target.common_dir)
+            .map(|cached| cached.view.retarget(target))
     }
 
     fn run_trash_delete(&mut self) -> Result<(), String> {
@@ -584,7 +803,9 @@ impl BrowserApp {
     }
 
     fn confirm_action(&mut self) -> Result<(), String> {
-        if let Some(request) = self.state.confirm_clean() {
+        if let Some(request) = self.state.confirm_git_gc() {
+            self.dispatch_git_gc(request);
+        } else if let Some(request) = self.state.confirm_clean() {
             let request_id = self.ops.start_clean();
             let _ = self.bg_tx.send(BgRequest::Clean {
                 request_id,
@@ -595,6 +816,14 @@ impl BrowserApp {
         }
 
         Ok(())
+    }
+
+    fn dispatch_git_gc(&mut self, request: GitStorageRequest) {
+        let request_id = self.ops.start_git_gc();
+        let _ = self.bg_tx.send(BgRequest::GitGc {
+            request_id,
+            target: request.into_target(),
+        });
     }
 
     fn dispatch_delete(&mut self, request: DeleteRequest) {
@@ -658,6 +887,13 @@ fn render(frame: &mut ratatui::Frame, app: &BrowserApp) {
         let popup = centered_rect(area, 70, 45);
         frame.render_widget(Clear, popup);
         frame.render_widget(render_clean_dialog(app.state.clean_state()), popup);
+    } else if !matches!(app.state.git_storage_state(), GitStorageState::Idle) {
+        let popup = centered_rect(area, 70, 45);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            render_git_storage_dialog(app.state.git_storage_state()),
+            popup,
+        );
     }
 }
 
@@ -763,7 +999,14 @@ fn render_list(
         .enumerate()
         .map(|(offset, entry)| {
             let is_selected = start + offset == selected_index;
-            list_item_for_entry(entry, is_selected, icon_mode, loading_paths, spinner_tick)
+            list_item_for_entry(
+                entry,
+                is_selected,
+                icon_mode,
+                loading_paths,
+                state.git_storage_is_loading(),
+                spinner_tick,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -813,14 +1056,21 @@ fn list_item_for_entry(
     is_selected: bool,
     icon_mode: &theme::IconMode,
     loading_paths: Option<&HashSet<PathBuf>>,
+    git_storage_loading: bool,
     spinner_tick: usize,
 ) -> ListItem<'static> {
-    let size_label = if loading_paths.is_some_and(|paths| paths.contains(&entry.path))
-        && !matches!(entry.entry_kind, EntryKind::Parent)
-    {
+    let is_loading = (loading_paths.is_some_and(|paths| paths.contains(&entry.path))
+        && !matches!(entry.entry_kind, EntryKind::Parent))
+        || (git_storage_loading && matches!(entry.entry_kind, EntryKind::GitStorage));
+    let size_label = if is_loading {
         spinner_label(spinner_tick).to_string()
     } else {
-        let label = human_bytes(entry.reclaimable_bytes);
+        let bytes = if matches!(entry.entry_kind, EntryKind::GitStorage) {
+            entry.size_bytes
+        } else {
+            entry.reclaimable_bytes
+        };
+        let label = human_bytes(bytes);
         if entry.size_status.is_complete() {
             label
         } else {
@@ -850,8 +1100,15 @@ fn list_item_for_entry(
             theme::candidate_badge_style(),
         ));
     }
+    if matches!(entry.entry_kind, EntryKind::GitStorage) {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "[git-storage]",
+            theme::candidate_badge_style(),
+        ));
+    }
 
-    let git_label = if !matches!(entry.entry_kind, EntryKind::Parent) {
+    let git_label = if !matches!(entry.entry_kind, EntryKind::Parent | EntryKind::GitStorage) {
         match entry.git_status {
             GitStatus::Ignored => Some("ignored"),
             GitStatus::Tracked => Some("tracked"),
@@ -906,6 +1163,12 @@ fn compute_scroll_offset(len: usize, selected_index: usize, viewport_len: usize)
 }
 
 fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'static> {
+    if state
+        .selected_entry_ref()
+        .is_some_and(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
+    {
+        return render_git_storage_context(state);
+    }
     let mut lines = if let Some(entry) = state.selected_entry_ref() {
         let size_label = human_bytes(entry.size_bytes);
         let reclaimable_label = human_bytes(entry.reclaimable_bytes);
@@ -1000,23 +1263,34 @@ fn render_context(state: &AppState, profile_error: Option<&str>) -> Paragraph<'s
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let hint = match (state.delete_state(), state.clean_state()) {
-        (DeleteState::Idle, CleanState::Idle) => {
-            if state.can_clean_current_dir() {
-                "q quit | j/k move | enter open | h back | f filter | d delete | x clean"
-            } else {
-                "q quit | j/k move | enter open | h back | f filter | d delete"
+    let hint = if !matches!(state.git_storage_state(), GitStorageState::Idle) {
+        match state.git_storage_state() {
+            GitStorageState::Confirming { .. } => "y run git gc | esc cancel",
+            GitStorageState::Running { .. } => "running git gc...",
+            GitStorageState::Failed { .. } => "esc dismiss",
+            GitStorageState::Idle => unreachable!("checked above"),
+        }
+    } else {
+        match (state.delete_state(), state.clean_state()) {
+            (DeleteState::Idle, CleanState::Idle) => {
+                if state.can_gc_selected() {
+                    "q quit | j/k move | h back | f filter | x git gc"
+                } else if state.can_clean_current_dir() {
+                    "q quit | j/k move | enter open | h back | f filter | d delete | x clean"
+                } else {
+                    "q quit | j/k move | enter open | h back | f filter | d delete"
+                }
             }
+            (DeleteState::Confirming { .. }, _) => "t trash | y permanent | esc cancel",
+            (DeleteState::AwaitingExtraConfirmation { .. }, _) => {
+                "y confirm dangerous delete | esc cancel"
+            }
+            (DeleteState::Running { .. }, _) => "running delete...",
+            (DeleteState::Failed { .. }, _) => "esc dismiss",
+            (DeleteState::Idle, CleanState::Confirming { .. }) => "y run clean | esc cancel",
+            (DeleteState::Idle, CleanState::Running { .. }) => "running clean...",
+            (DeleteState::Idle, CleanState::Failed { .. }) => "esc dismiss",
         }
-        (DeleteState::Confirming { .. }, _) => "t trash | y permanent | esc cancel",
-        (DeleteState::AwaitingExtraConfirmation { .. }, _) => {
-            "y confirm dangerous delete | esc cancel"
-        }
-        (DeleteState::Running { .. }, _) => "running delete...",
-        (DeleteState::Failed { .. }, _) => "esc dismiss",
-        (DeleteState::Idle, CleanState::Confirming { .. }) => "y run clean | esc cancel",
-        (DeleteState::Idle, CleanState::Running { .. }) => "running clean...",
-        (DeleteState::Idle, CleanState::Failed { .. }) => "esc dismiss",
     };
 
     let block = Block::default().borders(Borders::ALL).title("Keys");
@@ -1102,6 +1376,100 @@ fn render_clean_dialog(state: &CleanState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
+fn render_git_storage_context(state: &AppState) -> Paragraph<'static> {
+    let lines = if let Some(analysis) = state.git_storage_analysis() {
+        vec![
+            Line::raw(format!(
+                "common dir: {}",
+                analysis.target.common_dir.display()
+            )),
+            Line::raw(format!(
+                "physical total: {}{}",
+                if analysis.total_size_status.is_complete() {
+                    ""
+                } else {
+                    "~"
+                },
+                human_bytes(analysis.total_size_bytes)
+            )),
+            Line::raw(format!(
+                "pack: {} ({} packs, {} objects)",
+                human_bytes(analysis.pack_size_bytes),
+                analysis.pack_count,
+                analysis.packed_object_count
+            )),
+            Line::raw(format!(
+                "loose: {} ({} objects)",
+                human_bytes(analysis.loose_object_size_bytes),
+                analysis.loose_object_count
+            )),
+            Line::raw(format!(
+                "garbage: {} ({} files)",
+                human_bytes(analysis.garbage_size_bytes),
+                analysis.garbage_count
+            )),
+            Line::raw(format!(
+                "prune-packable: {} objects",
+                analysis.prune_packable_count
+            )),
+            Line::raw(format!(
+                "Git LFS: {}{} (not cleaned)",
+                if analysis.lfs_size_status.is_complete() {
+                    ""
+                } else {
+                    "~"
+                },
+                human_bytes(analysis.lfs_size_bytes)
+            )),
+            Line::raw("reclaimable: confirmed after git gc"),
+            Line::raw("action: x runs conservative `git gc`"),
+        ]
+    } else if let Some(error) = state.git_storage_error() {
+        vec![
+            Line::styled(
+                format!("Git storage analysis unavailable: {error}"),
+                Style::default().fg(Color::Red),
+            ),
+            Line::raw("git gc is disabled"),
+        ]
+    } else {
+        vec![Line::raw("Analyzing Git storage ...")]
+    };
+
+    Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Git storage"))
+        .wrap(Wrap { trim: true })
+}
+
+fn render_git_storage_dialog(state: &GitStorageState) -> Paragraph<'static> {
+    let lines = match state {
+        GitStorageState::Confirming { analysis } => vec![
+            Line::raw(format!("Maintain {}", analysis.target.common_dir.display())),
+            Line::raw(format!(
+                "identified garbage: {}",
+                human_bytes(analysis.garbage_size_bytes)
+            )),
+            Line::raw("Command: git gc"),
+            Line::raw("No --prune=now, --aggressive, or --force."),
+            Line::raw(""),
+            Line::raw("y: run git gc"),
+            Line::raw("esc: cancel"),
+        ],
+        GitStorageState::Running { target } => vec![Line::raw(format!(
+            "Running git gc for {} ...",
+            target.common_dir.display()
+        ))],
+        GitStorageState::Failed { message } => {
+            vec![Line::raw(message.clone()), Line::raw("esc: dismiss")]
+        }
+        GitStorageState::Idle => vec![Line::raw("")],
+    };
+
+    Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Git GC"))
+        .wrap(Wrap { trim: true })
+}
+
 fn centered_rect(
     area: ratatui::layout::Rect,
     width_percent: u16,
@@ -1152,11 +1520,13 @@ mod tests {
     use crate::model::{BrowserEntry, EntryKind, GitContext, GitStatus, RiskLevel, SizeStatus};
     use crate::scan::entry as browser_entries;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
     use tempfile::tempdir;
 
-    use super::BrowserApp;
+    use super::{AppState, BrowserApp, CleanState, DeleteState, GitStorageState, GitStorageView};
     use crate::config::AppContext;
+    use crate::git_storage::{GitStorageAnalysis, GitStorageTarget};
     use crate::model::CandidateKind;
 
     #[tokio::test]
@@ -1181,6 +1551,97 @@ mod tests {
         assert!(app.loads.load_error(temp.path()).is_none());
         assert_eq!(app.state.entries().len(), 1);
         assert_eq!(app.state.entries()[0].name, "README.md");
+    }
+
+    #[tokio::test]
+    async fn repo_root_streams_a_git_storage_entry() {
+        let temp = tempdir().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("git available");
+        assert!(status.success());
+        let mut app =
+            BrowserApp::new(temp.path().to_path_buf(), AppContext::default()).expect("browser app");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                app.pump_background();
+                if app.loads.is_complete(temp.path())
+                    && app
+                        .state
+                        .entries()
+                        .iter()
+                        .any(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
+                    && app.state.git_storage_analysis().is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Git storage analysis should complete");
+
+        let entry = app
+            .state
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
+            .expect("Git storage entry");
+        assert_eq!(entry.path, temp.path().join(".git"));
+    }
+
+    #[test]
+    fn git_storage_entry_cannot_enter_delete_flow() {
+        let root = PathBuf::from("/repo");
+        let analysis = git_storage_analysis(&root);
+        let mut state = AppState::new(root, vec![analysis.browser_entry()]);
+        state.set_git_storage(Some(GitStorageView::Available(analysis)));
+
+        state.request_delete_for_selected();
+
+        assert_eq!(state.delete_state(), &DeleteState::Idle);
+    }
+
+    #[test]
+    fn x_opens_git_gc_instead_of_project_clean_for_git_storage() {
+        let root = PathBuf::from("/repo");
+        let analysis = git_storage_analysis(&root);
+        let mut state = AppState::new(root, vec![analysis.browser_entry()]);
+        state.set_git_storage(Some(GitStorageView::Available(analysis)));
+
+        state.request_clean_current_dir();
+
+        assert!(matches!(
+            state.git_storage_state(),
+            GitStorageState::Confirming { .. }
+        ));
+        assert_eq!(state.clean_state(), &CleanState::Idle);
+    }
+
+    #[test]
+    fn shared_storage_cache_retargets_the_current_worktree() {
+        let first_root = PathBuf::from("/repo");
+        let second_root = PathBuf::from("/worktree");
+        let view = GitStorageView::Available(git_storage_analysis(&first_root));
+        let mut target = git_storage_analysis(&first_root).target;
+        target.repo_root = second_root.clone();
+        target.git_context.repo_root = Some(second_root.clone());
+        target.git_context.worktree_root = Some(second_root.clone());
+        target.git_context.branch_name = Some("feature".to_string());
+
+        let GitStorageView::Available(retargeted) = view.retarget(target) else {
+            panic!("available view");
+        };
+
+        assert_eq!(retargeted.target.repo_root, second_root);
+        assert_eq!(
+            retargeted.target.git_context.branch_name.as_deref(),
+            Some("feature")
+        );
+        assert_eq!(retargeted.total_size_bytes, 100);
     }
 
     #[test]
@@ -1268,5 +1729,33 @@ mod tests {
         assert_eq!(entries[1].entry_kind, EntryKind::File);
         assert_eq!(entries[2].name, "a");
         assert_eq!(entries[3].name, "b");
+    }
+
+    fn git_storage_analysis(root: &Path) -> GitStorageAnalysis {
+        let context = GitContext {
+            repo_root: Some(root.to_path_buf()),
+            common_dir: Some(root.join(".git")),
+            worktree_root: Some(root.to_path_buf()),
+            ..GitContext::default()
+        };
+        GitStorageAnalysis {
+            target: GitStorageTarget {
+                repo_root: root.to_path_buf(),
+                common_dir: root.join(".git"),
+                git_context: context,
+            },
+            total_size_bytes: 100,
+            total_size_status: SizeStatus::Complete,
+            loose_object_count: 1,
+            loose_object_size_bytes: 10,
+            packed_object_count: 2,
+            pack_count: 1,
+            pack_size_bytes: 80,
+            prune_packable_count: 0,
+            garbage_count: 1,
+            garbage_size_bytes: 10,
+            lfs_size_bytes: 0,
+            lfs_size_status: SizeStatus::Complete,
+        }
     }
 }

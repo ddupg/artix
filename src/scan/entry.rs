@@ -172,7 +172,7 @@ pub(crate) fn apply_browser_entry_update(entries: &mut [BrowserEntry], update: &
 fn placeholder_sort_rank(entry: &BrowserEntry) -> u8 {
     match entry.entry_kind {
         EntryKind::Parent => 0,
-        EntryKind::CleanupCandidate(_) => 1,
+        EntryKind::CleanupCandidate(_) | EntryKind::GitStorage => 1,
         EntryKind::Directory | EntryKind::File => 2,
     }
 }
