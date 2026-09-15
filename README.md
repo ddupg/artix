@@ -33,10 +33,10 @@
 
 ### Git 存储维护
 
-- 仓库根目录始终显示一个只读的 `Git storage` 条目；多个 worktree 按共享的 `common_dir` 识别同一份存储
+- 仓库根目录始终显示一个只读的 `.git [git-storage]` 条目；多个 worktree 按共享的 `common_dir` 识别同一份存储
 - 后台使用 `git count-objects -v` 展示 `.git` 总占用、pack、loose objects、garbage 和 prune-packable objects
 - Git LFS 占用单独展示，但不纳入普通 Git GC
-- 选中 `Git storage` 后按 `x`，确认后执行保守的 `git gc`
+- 选中 `.git [git-storage]` 后按 `x`，确认后执行保守的 `git gc`
 - 不使用 `--prune=now`、`--aggressive` 或 `--force`，也不会直接删除 `.git` 下的文件或 refs
 - Git 分析失败时显示错误并禁用 GC；GC 完成后重新分析实际占用
 
@@ -210,7 +210,7 @@ mode = "plain"
 - `d`：打开删除确认
 - `t`：在删除确认框中移动到废纸篓
 - `y`：在删除确认框中永久删除，或在 clean / Git GC 确认框中执行操作
-- `x`：选中 `Git storage` 时打开 Git GC 确认；否则对当前可 clean 项目打开 clean 确认
+- `x`：选中 `.git [git-storage]` 时打开 Git GC 确认；否则对当前可 clean 项目打开 clean 确认
 - `Esc`：关闭弹窗
 - `q`：退出
 
