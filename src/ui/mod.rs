@@ -1590,6 +1590,7 @@ mod tests {
             .iter()
             .find(|entry| matches!(entry.entry_kind, EntryKind::GitStorage))
             .expect("Git storage entry");
+        assert_eq!(entry.name, ".git");
         assert_eq!(entry.path, temp.path().join(".git"));
     }
 

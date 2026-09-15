@@ -33,7 +33,7 @@ impl GitStorageTarget {
     pub fn placeholder_entry(&self) -> BrowserEntry {
         BrowserEntry {
             path: self.common_dir.clone(),
-            name: "Git storage".to_string(),
+            name: ".git".to_string(),
             size_bytes: 0,
             reclaimable_bytes: 0,
             size_status: SizeStatus::Incomplete,
@@ -66,7 +66,7 @@ impl GitStorageAnalysis {
     pub fn browser_entry(&self) -> BrowserEntry {
         BrowserEntry {
             path: self.target.common_dir.clone(),
-            name: "Git storage".to_string(),
+            name: ".git".to_string(),
             size_bytes: self.total_size_bytes,
             reclaimable_bytes: self.garbage_size_bytes,
             size_status: self.total_size_status,
