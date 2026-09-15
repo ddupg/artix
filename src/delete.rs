@@ -1,6 +1,9 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
 
 use crate::config::{Config, DeleteConfig, TrashBackend};
 
@@ -42,10 +45,48 @@ pub fn delete_directories_with_config(
 fn delete_path_permanently(path: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
     if metadata.file_type().is_dir() {
-        fs::remove_dir_all(path).map_err(|err| err.to_string())
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(err) if is_too_many_open_files(&err) => remove_dir_all_bounded(path),
+            Err(err) => Err(err.to_string()),
+        }
     } else {
         fs::remove_file(path).map_err(|err| err.to_string())
     }
+}
+
+#[cfg(unix)]
+fn is_too_many_open_files(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EMFILE)
+}
+
+#[cfg(not(unix))]
+fn is_too_many_open_files(_err: &io::Error) -> bool {
+    false
+}
+
+fn remove_dir_all_bounded(path: &Path) -> Result<(), String> {
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
+        .contents_first(true)
+        .max_open(1)
+    {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let result = if entry.file_type().is_dir() {
+            fs::remove_dir(entry.path())
+        } else {
+            fs::remove_file(entry.path())
+        };
+
+        if let Err(err) = result
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            return Err(err.to_string());
+        }
+    }
+
+    Ok(())
 }
 
 fn move_to_trash(path: &Path, delete_config: &DeleteConfig) -> Result<(), String> {

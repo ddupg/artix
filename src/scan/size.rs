@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::AppContext;
 use crate::model::SizeStatus;
@@ -71,63 +71,66 @@ fn dir_size_bytes_sync_inner(
     traversal: SizeTraversalOptions,
     visited_dirs: &mut HashSet<(u64, u64)>,
 ) -> SizeMeasurement {
-    let Ok(entries) = fs::read_dir(path) else {
-        return SizeMeasurement::incomplete(0);
-    };
-
     let mut measurement = SizeMeasurement::complete(0);
+    let mut pending_dirs = vec![PathBuf::from(path)];
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
+    while let Some(dir) = pending_dirs.pop() {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
             Err(_) => {
                 measurement.mark_incomplete();
                 continue;
             }
         };
-        let entry_path = entry.path();
 
-        let meta_link = match fs::symlink_metadata(&entry_path) {
-            Ok(meta) => meta,
-            Err(_) => {
-                measurement.mark_incomplete();
-                continue;
-            }
-        };
-        let is_symlink = meta_link.file_type().is_symlink();
-
-        if is_symlink && !traversal.follow_symlinks {
-            measurement.add(SizeMeasurement::complete(meta_link.len()));
-            continue;
-        }
-
-        let meta = if is_symlink && traversal.follow_symlinks {
-            match fs::metadata(&entry_path) {
-                Ok(meta) => meta,
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
                 Err(_) => {
-                    measurement.add(SizeMeasurement::incomplete(meta_link.len()));
+                    measurement.mark_incomplete();
                     continue;
                 }
-            }
-        } else {
-            meta_link
-        };
+            };
+            let entry_path = entry.path();
 
-        if meta.file_type().is_dir() {
-            if traversal.dedup_dir_inodes
-                && let Some(key) = dir_key(&meta)
-                && !visited_dirs.insert(key)
-            {
+            let meta_link = match fs::symlink_metadata(&entry_path) {
+                Ok(meta) => meta,
+                Err(_) => {
+                    measurement.mark_incomplete();
+                    continue;
+                }
+            };
+            let is_symlink = meta_link.file_type().is_symlink();
+
+            if is_symlink && !traversal.follow_symlinks {
+                measurement.add(SizeMeasurement::complete(meta_link.len()));
                 continue;
             }
 
-            measurement.add(dir_size_bytes_sync_inner(
-                &entry_path,
-                traversal,
-                visited_dirs,
-            ));
-        } else {
-            measurement.add(SizeMeasurement::complete(meta.len()));
+            let meta = if is_symlink && traversal.follow_symlinks {
+                match fs::metadata(&entry_path) {
+                    Ok(meta) => meta,
+                    Err(_) => {
+                        measurement.add(SizeMeasurement::incomplete(meta_link.len()));
+                        continue;
+                    }
+                }
+            } else {
+                meta_link
+            };
+
+            if meta.file_type().is_dir() {
+                if traversal.dedup_dir_inodes
+                    && let Some(key) = dir_key(&meta)
+                    && !visited_dirs.insert(key)
+                {
+                    continue;
+                }
+
+                pending_dirs.push(entry_path);
+            } else {
+                measurement.add(SizeMeasurement::complete(meta.len()));
+            }
         }
     }
 
@@ -180,7 +183,9 @@ pub async fn measure_size(path: &Path, ctx: &AppContext) -> SizeMeasurement {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
+    use std::process::Command;
 
     use tempfile::tempdir;
 
@@ -204,6 +209,51 @@ mod tests {
 
         assert_eq!(measurement.bytes(), 5);
         assert_eq!(measurement.status(), SizeStatus::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_tree_measurement_stays_complete_under_low_fd_limit() {
+        const CHILD_ENV: &str = "ARTIX_LOW_FD_SIZE_TEST_CHILD";
+
+        if env::var_os(CHILD_ENV).is_none() {
+            let current_exe = env::current_exe().expect("current test executable");
+            let status = Command::new("sh")
+                .args(["-c", "ulimit -n 32 && exec \"$@\"", "sh"])
+                .arg(current_exe)
+                .args([
+                    "--exact",
+                    "scan::size::tests::deep_tree_measurement_stays_complete_under_low_fd_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("run low-fd child test");
+            assert!(status.success(), "low-fd child test failed: {status}");
+            return;
+        }
+
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        let mut path = root.clone();
+        let mut directories = vec![root.clone()];
+        fs::create_dir(&root).expect("create root");
+        for _ in 0..64 {
+            path.push("d");
+            fs::create_dir(&path).expect("create nested directory");
+            directories.push(path.clone());
+        }
+        let leaf = path.join("artifact");
+        fs::write(&leaf, "12345").expect("write artifact");
+
+        let measurement = measure_path(&root, DEFAULT_TRAVERSAL);
+
+        fs::remove_file(leaf).expect("remove artifact");
+        for directory in directories.into_iter().rev() {
+            fs::remove_dir(directory).expect("remove fixture directory");
+        }
+
+        assert_eq!(measurement, SizeMeasurement::complete(5));
     }
 
     #[cfg(unix)]

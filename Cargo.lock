@@ -58,6 +58,7 @@ dependencies = [
  "directories",
  "gengo",
  "gix",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",
