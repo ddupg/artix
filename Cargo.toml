@@ -7,7 +7,7 @@ rust-version = "1.96.0"
 [dependencies]
 crossterm = "0.29.0"
 directories = "6"
-gix = { version = "0.85.0", default-features = false, features = ["excludes", "sha1"] }
+gix = { version = "0.87.1", default-features = false, features = ["excludes", "sha1"] }
 gengo = { version = "0.14.3", default-features = false, features = ["directory"] }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
